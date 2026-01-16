@@ -32,12 +32,54 @@ s3://indian-district-court-judgments/
 ├── data/
 │   └── tar/
 │       └── year={YYYY}/state={code}/district={code}/complex={code}/
-│           ├── orders.tar          # PDF judgments
-│           └── orders.index.json   # Archive index
+│           ├── orders.tar           # PDF judgments (uncompressed TAR)
+│           └── orders.index.json    # Archive index (V2 format)
 └── metadata/
-    ├── tar/year={YYYY}/state={code}/.../metadata.tar
-    └── parquet/year={YYYY}/state={code}/.../metadata.parquet
+    ├── tar/
+    │   └── year={YYYY}/state={code}/district={code}/complex={code}/
+    │       ├── metadata.tar         # Case metadata JSON files
+    │       └── metadata.index.json  # Metadata archive index
+    └── parquet/
+        └── year={YYYY}/state={code}/
+            └── metadata.parquet     # Aggregated metadata for analytics
 ```
+
+**Index File Format (V2):**
+
+Each archive has an accompanying `.index.json` file:
+
+```json
+{
+  "year": 2025,
+  "state_code": "29",
+  "district_code": "22",
+  "complex_code": "1290148",
+  "archive_type": "orders",
+  "file_count": 578,
+  "total_size": 85000000,
+  "total_size_human": "81.01 MB",
+  "created_at": "2025-01-14T19:25:47+05:30",
+  "updated_at": "2025-01-14T19:25:47+05:30",
+  "parts": [
+    {
+      "name": "orders.tar",
+      "files": ["MVOP_63_2021.pdf", "CRL_A_123_2022.pdf", ...],
+      "file_count": 578,
+      "size": 85000000,
+      "size_human": "81.01 MB",
+      "created_at": "2025-01-14T19:25:47+05:30"
+    }
+  ]
+}
+```
+
+**Multi-part Archives:**
+
+When archives exceed 1GB, they are automatically split into parts:
+- First part: `orders.tar`
+- Subsequent parts: `part-20250114T192547.tar`, etc.
+
+The index file tracks all parts and their contents.
 
 ## Installation
 
@@ -128,6 +170,27 @@ uv run python download.py --sync-s3
 # Processes data in 5-year chunks, automatically resuming
 uv run python download.py --sync-s3-fill --timeout-hours 5.5
 ```
+
+### Step 3: Generate Parquet Files (Optional)
+
+After uploading metadata to S3, generate Parquet files for analytics:
+
+```bash
+# Process all metadata in S3 bucket
+uv run python process_metadata.py
+
+# Process specific year
+uv run python process_metadata.py --year 2025
+
+# Process specific state
+uv run python process_metadata.py --state 29
+
+# Process specific year and state
+uv run python process_metadata.py --year 2025 --state 29
+```
+
+This reads metadata TAR files from S3 and generates Parquet files at:
+`metadata/parquet/year={YYYY}/state={code}/metadata.parquet`
 
 ### Command Line Options
 
