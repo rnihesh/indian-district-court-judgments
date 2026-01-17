@@ -199,7 +199,7 @@ This reads metadata TAR files from S3 and generates Parquet files at:
 | `--start_date` | Start date in YYYY-MM-DD format |
 | `--end_date` | End date in YYYY-MM-DD format |
 | `--day_step` | Days per chunk (default: 1) |
-| `--max_workers` | Parallel workers (default: 5) |
+| `--max_workers` | Parallel workers (default: 2, to avoid rate limiting) |
 | `--state_code` | Filter by state code |
 | `--district_code` | Filter by district code |
 | `--complex_code` | Filter by complex code |

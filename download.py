@@ -23,6 +23,7 @@ import logging
 import random
 import re
 import sys
+import threading
 import time
 import traceback
 import uuid
@@ -82,12 +83,16 @@ LOCAL_DIR = Path("./local_dc_judgments_data")
 PACKAGES_DIR = Path("./packages")
 IST = timezone(timedelta(hours=5, minutes=30))
 START_DATE = "1950-01-01"
+COMPLETED_TASKS_FILE = Path("./dc_completed_tasks.json")
 
 # Directories for captcha handling
 captcha_tmp_dir = Path("./captcha-tmp")
 captcha_failures_dir = Path("./captcha-failures")
 captcha_tmp_dir.mkdir(parents=True, exist_ok=True)
 captcha_failures_dir.mkdir(parents=True, exist_ok=True)
+
+# Thread lock for completed tasks file
+completed_tasks_lock = threading.Lock()
 
 # Request headers
 HEADERS = {
@@ -99,6 +104,39 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
     "X-Requested-With": "XMLHttpRequest",
 }
+
+
+def get_task_key(task) -> str:
+    """Generate a unique key for a task (court + date combination)"""
+    return f"{task.state_code}_{task.district_code}_{task.complex_code}_{task.from_date}_{task.to_date}"
+
+
+def load_completed_tasks() -> set:
+    """Load completed tasks from file"""
+    if not COMPLETED_TASKS_FILE.exists():
+        return set()
+    try:
+        with open(COMPLETED_TASKS_FILE, "r") as f:
+            data = json.load(f)
+            return set(data.get("completed", []))
+    except (json.JSONDecodeError, IOError):
+        return set()
+
+
+def save_completed_task(task_key: str):
+    """Save a completed task to file (thread-safe)"""
+    with completed_tasks_lock:
+        completed = load_completed_tasks()
+        completed.add(task_key)
+        with open(COMPLETED_TASKS_FILE, "w") as f:
+            json.dump({"completed": list(completed)}, f)
+
+
+def is_task_completed(task) -> bool:
+    """Check if a task has already been completed"""
+    task_key = get_task_key(task)
+    completed = load_completed_tasks()
+    return task_key in completed
 
 
 @dataclass
@@ -215,9 +253,19 @@ class Downloader:
         """Initialize session and get app_token"""
         logger.debug(f"Initializing session for task: {self.task}")
 
+        # Add small random delay to avoid rate limiting
+        time.sleep(random.uniform(0.5, 1.5))
+
         # Get the court orders page with retry
         url = f"{BASE_URL}?p=courtorder/index"
         response = self._fetch_with_retry("GET", url, timeout=30, verify=False)
+
+        # Handle rate limiting (405 Security Page)
+        if response.status_code == 405:
+            logger.warning("Rate limited (405). Waiting 30s before retry...")
+            time.sleep(30)
+            response = self._fetch_with_retry("GET", url, timeout=30, verify=False)
+
         response.raise_for_status()
 
         # Extract app_token
@@ -270,9 +318,9 @@ class Downloader:
         if retries > 10:
             raise ValueError("Failed to solve CAPTCHA after 10 attempts")
 
-        # Get captcha image
+        # Get captcha image with retry
         captcha_url = f"{BASE_URL}vendor/securimage/securimage_show.php?{uuid.uuid4().hex}"
-        response = self.session.get(captcha_url, timeout=30, verify=False)
+        response = self._fetch_with_retry("GET", captcha_url, timeout=30, verify=False)
 
         # Save and process
         unique_id = uuid.uuid4().hex[:8]
@@ -295,9 +343,13 @@ class Downloader:
 
         except Exception as e:
             logger.error(f"Error solving captcha: {e}")
-            # Move to failures dir for debugging
-            new_path = captcha_failures_dir / f"{uuid.uuid4().hex[:8]}_{captcha_path.name}"
-            captcha_path.rename(new_path)
+            # Move to failures dir for debugging (if file exists)
+            if captcha_path.exists():
+                new_path = captcha_failures_dir / f"{uuid.uuid4().hex[:8]}_{captcha_path.name}"
+                try:
+                    captcha_path.rename(new_path)
+                except Exception:
+                    pass  # Ignore if file was already moved/deleted
             return self.solve_captcha(retries + 1)
 
     def search_orders(self) -> Optional[str]:
@@ -601,6 +653,11 @@ class Downloader:
 
     def download(self):
         """Process the task - search and download orders"""
+        # Check if task already completed (BEFORE hitting the server)
+        if is_task_completed(self.task):
+            logger.debug(f"Skipping already completed task: {self.task}")
+            return
+
         try:
             self.init_session()
 
@@ -613,23 +670,32 @@ class Downloader:
             html = self.search_orders()
             if not html:
                 logger.debug(f"No results for task: {self.task}")
+                # Mark as completed even if no results (so we don't retry)
+                save_completed_task(get_task_key(self.task))
                 return
 
             # Parse results
             orders = self.parse_order_results(html)
             if not orders:
                 logger.debug(f"No orders found for task: {self.task}")
+                # Mark as completed even if no orders
+                save_completed_task(get_task_key(self.task))
                 return
 
             logger.info(f"Found {len(orders)} orders for task: {self.task}")
 
-            # Process each order
+            # Process each order with progress bar
             downloaded = 0
-            for order in orders:
+            pbar = tqdm(orders, desc=f"PDFs ({self.task.complex_name[:20]})", leave=False, unit="pdf")
+            for order in pbar:
                 if self.process_order(order):
                     downloaded += 1
+                    pbar.set_postfix({"new": downloaded})
 
-            logger.info(f"Downloaded {downloaded} new PDFs for task: {self.task}")
+            logger.info(f"Downloaded {downloaded} new PDFs out of {len(orders)} orders for task: {self.task}")
+
+            # Mark task as completed
+            save_completed_task(get_task_key(self.task))
 
         except Exception as e:
             logger.error(f"Error processing task {self.task}: {e}")
@@ -709,14 +775,14 @@ def main():
     parser.add_argument(
         "--day_step",
         type=int,
-        default=1,
+        default=2100, # Large default to minimize chunks & districts has no pagination & ~5yrs data
         help="Number of days per chunk",
     )
     parser.add_argument(
         "--max_workers",
         type=int,
-        default=5,
-        help="Number of parallel workers",
+        default=2,
+        help="Number of parallel workers (default: 2 to avoid rate limiting)",
     )
     parser.add_argument(
         "--state_code",

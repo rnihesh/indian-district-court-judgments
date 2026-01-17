@@ -181,3 +181,5 @@ packages/
 *.png
 dc_fill_track.json
 dc_sync_track.json
+dc_completed_tasks.json
+run.txt
