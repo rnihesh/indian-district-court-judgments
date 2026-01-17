@@ -47,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from archive_manager import S3ArchiveManager
 from src.captcha_solver.main import get_text
 from src.utils.court_utils import CourtComplex, load_courts_csv
+from src.gs import check_ghostscript_available, compress_pdf_if_enabled
 
 # Configure logging
 root_logger = logging.getLogger()
@@ -74,6 +75,11 @@ logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore", message=".*pin_memory.*not supported on MPS.*")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Check if Ghostscript is available for PDF compression
+COMPRESSION_AVAILABLE = check_ghostscript_available()
+if not COMPRESSION_AVAILABLE:
+    print("WARNING: PDF compression not available (Ghostscript not found)")
 
 # Configuration
 BASE_URL = "https://services.ecourts.gov.in/ecourtindia_v6/"
@@ -216,13 +222,20 @@ def generate_tasks(
 class Downloader:
     """Downloads court orders from eCourts website"""
 
-    def __init__(self, task: DistrictCourtTask, archive_manager: S3ArchiveManager):
+    def __init__(
+        self,
+        task: DistrictCourtTask,
+        archive_manager: S3ArchiveManager,
+        compress_pdfs: bool = True,
+    ):
         self.task = task
         self.archive_manager = archive_manager
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
         self.app_token = None
         self.session_cookie = None
+        # PDF compression (enabled by default if Ghostscript is available)
+        self.compress_pdfs = compress_pdfs and COMPRESSION_AVAILABLE
 
     def _extract_app_token(self, html: str) -> Optional[str]:
         """Extract app_token from HTML content"""
@@ -567,6 +580,47 @@ class Downloader:
 
         return None
 
+    def _compress_pdf_bytes(self, pdf_content: bytes) -> bytes:
+        """
+        Compress PDF content (bytes) using Ghostscript.
+        Returns compressed bytes if successful, original bytes otherwise.
+        """
+        import tempfile
+
+        try:
+            # Write to temp file
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_in:
+                tmp_in.write(pdf_content)
+                tmp_in_path = Path(tmp_in.name)
+
+            original_size = len(pdf_content)
+
+            # Compress the PDF
+            compressed_path = compress_pdf_if_enabled(tmp_in_path, COMPRESSION_AVAILABLE)
+
+            # Read the result
+            with open(compressed_path, "rb") as f:
+                result_content = f.read()
+
+            compressed_size = len(result_content)
+
+            # Clean up temp file
+            if tmp_in_path.exists():
+                tmp_in_path.unlink()
+
+            # Log compression result
+            if compressed_size < original_size:
+                reduction = (1 - compressed_size / original_size) * 100
+                logger.debug(
+                    f"Compressed PDF: {original_size} -> {compressed_size} bytes ({reduction:.1f}% reduction)"
+                )
+
+            return result_content
+
+        except Exception as e:
+            logger.debug(f"PDF compression failed: {e}")
+            return pdf_content
+
     def process_order(self, order_data: dict) -> bool:
         """Process a single order - download PDF and save metadata"""
         cnr = order_data.get("cnr", "")
@@ -638,6 +692,10 @@ class Downloader:
             # Download PDF
             pdf_content = self.download_pdf(order_data)
             if pdf_content:
+                # Compress PDF if enabled
+                if self.compress_pdfs:
+                    pdf_content = self._compress_pdf_bytes(pdf_content)
+
                 self.archive_manager.add_to_archive(
                     year,
                     self.task.state_code,
@@ -702,10 +760,14 @@ class Downloader:
             traceback.print_exc()
 
 
-def process_task(task: DistrictCourtTask, archive_manager: S3ArchiveManager):
+def process_task(
+    task: DistrictCourtTask,
+    archive_manager: S3ArchiveManager,
+    compress_pdfs: bool = True,
+):
     """Process a single task"""
     try:
-        downloader = Downloader(task, archive_manager)
+        downloader = Downloader(task, archive_manager, compress_pdfs=compress_pdfs)
         downloader.download()
     except Exception as e:
         logger.error(f"Error processing task {task}: {e}")
@@ -719,6 +781,7 @@ def run(
     day_step: int = 1,
     max_workers: int = 5,
     archive_manager: Optional[S3ArchiveManager] = None,
+    compress_pdfs: bool = True,
 ):
     """Run the downloader for all courts and date ranges"""
     # Create archive manager if not provided
@@ -737,7 +800,7 @@ def run(
     # Process tasks
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
-            executor.submit(process_task, task, archive_manager)
+            executor.submit(process_task, task, archive_manager, compress_pdfs)
             for task in tasks
         ]
 
@@ -826,7 +889,24 @@ def main():
         default=5.5,
         help="Maximum hours to run before graceful exit",
     )
+    parser.add_argument(
+        "--no-compress",
+        action="store_true",
+        default=False,
+        help="Disable PDF compression (compression is enabled by default)",
+    )
     args = parser.parse_args()
+
+    # Handle PDF compression settings
+    compress_pdfs = not args.no_compress
+    if compress_pdfs:
+        if COMPRESSION_AVAILABLE:
+            logger.info("PDF compression enabled (using Ghostscript)")
+        else:
+            logger.warning("PDF compression requested but Ghostscript not available - compression disabled")
+            compress_pdfs = False
+    else:
+        logger.info("PDF compression disabled (--no-compress flag)")
 
     # Load courts
     courts_path = Path(args.courts_csv)
@@ -865,6 +945,7 @@ def main():
             day_step=args.day_step,
             max_workers=args.max_workers,
             timeout_hours=args.timeout_hours,
+            compress_pdfs=compress_pdfs,
         )
     elif args.sync_s3:
         from sync_s3 import run_sync_s3
@@ -878,6 +959,7 @@ def main():
             end_date=args.end_date,
             day_step=args.day_step,
             max_workers=args.max_workers,
+            compress_pdfs=compress_pdfs,
         )
     else:
         # Default: local download mode
@@ -900,6 +982,7 @@ def main():
                 day_step=args.day_step,
                 max_workers=args.max_workers,
                 archive_manager=archive_manager,
+                compress_pdfs=compress_pdfs,
             )
 
 

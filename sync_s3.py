@@ -130,6 +130,7 @@ def run_sync_s3(
     end_date: Optional[str],
     day_step: int,
     max_workers: int,
+    compress_pdfs: bool = True,
 ):
     """
     Run the sync-s3 operation: check latest date in S3 and download new data.
@@ -188,6 +189,7 @@ def run_sync_s3(
                 day_step=day_step,
                 max_workers=max_workers,
                 archive_manager=archive_manager,
+                compress_pdfs=compress_pdfs,
             )
             changes_made = True
 

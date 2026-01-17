@@ -136,6 +136,7 @@ def sync_s3_fill_gaps(
     day_step: int,
     max_workers: int,
     timeout_hours: float = 5.5,
+    compress_pdfs: bool = True,
 ):
     """
     Fill historical gaps in S3 data.
@@ -181,6 +182,7 @@ def sync_s3_fill_gaps(
                 day_step=day_step,
                 max_workers=max_workers,
                 archive_manager=archive_manager,
+                compress_pdfs=compress_pdfs,
             )
 
             all_changes = archive_manager.get_all_changes()

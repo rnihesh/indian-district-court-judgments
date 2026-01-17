@@ -317,9 +317,29 @@ class S3ArchiveManager:
         complex_code: str,
         archive_type: str,
     ) -> IndexFileV2:
-        """Load index file from S3, returning empty index if not found"""
-        # In local_only mode, always return empty index
+        """Load index file from S3 (or local filesystem in local_only mode), returning empty index if not found"""
+        # In local_only mode, try to load from local filesystem
         if self.local_only:
+            local_dir = self._get_local_dir(year, state_code, district_code, complex_code)
+            index_name = f"{archive_type}.index.json"
+            local_index_path = local_dir / index_name
+
+            if local_index_path.exists():
+                try:
+                    with open(local_index_path, "r") as f:
+                        data = json.load(f)
+                    index = IndexFileV2.from_dict(data)
+                    index.year = year
+                    index.state_code = state_code
+                    index.district_code = district_code
+                    index.complex_code = complex_code
+                    index.archive_type = archive_type
+                    logger.debug(f"Loaded local index: {local_index_path} ({index.file_count} files)")
+                    return index
+                except (json.JSONDecodeError, IOError) as e:
+                    logger.warning(f"Error loading local index {local_index_path}: {e}")
+
+            # No local index found, return empty
             now = ist_now_iso()
             return IndexFileV2(
                 year=year,
@@ -584,6 +604,10 @@ class S3ArchiveManager:
             logger.info(
                 f"Archive finalized locally: {local_path.name} ({part_info['size_human']})"
             )
+            # Save local index for resume support in local_only mode
+            self._save_local_index(
+                year, state_code, district_code, complex_code, archive_type, part_info
+            )
         elif self.immediate_upload:
             logger.info(f"Immediately uploading finalized part: {local_path.name}")
             self._upload_single_part(
@@ -597,6 +621,48 @@ class S3ArchiveManager:
         del self.archive_paths[key]
         self.current_part_files[key] = []
         self.current_part_size[key] = 0
+
+    def _save_local_index(
+        self,
+        year: int,
+        state_code: str,
+        district_code: str,
+        complex_code: str,
+        archive_type: str,
+        part_info: dict,
+    ):
+        """Save index file locally for resume support in local_only mode"""
+        key = (year, state_code, district_code, complex_code, archive_type)
+
+        # Get or create index
+        if key not in self.indexes:
+            self.indexes[key] = self._load_index_from_s3(
+                year, state_code, district_code, complex_code, archive_type
+            )
+
+        index = self.indexes[key]
+
+        # Create IndexPart and add to index
+        new_part = IndexPart(
+            name=part_info["name"],
+            files=part_info["files"],
+            file_count=part_info["file_count"],
+            size=part_info["size"],
+            size_human=part_info["size_human"],
+            created_at=ist_now_iso(),
+        )
+        index.add_part(new_part)
+
+        # Write index locally
+        local_dir = self._get_local_dir(year, state_code, district_code, complex_code)
+        local_dir.mkdir(parents=True, exist_ok=True)
+        index_name = f"{archive_type}.index.json"
+        index_local_path = local_dir / index_name
+
+        with open(index_local_path, "w") as f:
+            json.dump(index.to_dict(), f, indent=2)
+
+        logger.info(f"Saved local index: {index_local_path} ({index.file_count} files)")
 
     def _upload_single_part(
         self,
