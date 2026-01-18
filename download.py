@@ -31,7 +31,7 @@ import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Generator, List, Optional
+from typing import Dict, Generator, List, Optional
 
 import colorlog
 import requests
@@ -83,7 +83,7 @@ if not COMPRESSION_AVAILABLE:
 
 # Configuration
 BASE_URL = "https://services.ecourts.gov.in/ecourtindia_v6/"
-S3_BUCKET = "indian-district-court-judgments"
+S3_BUCKET = "indian-district-court-judgments-test"
 S3_PREFIX = ""
 LOCAL_DIR = Path("./local_dc_judgments_data")
 PACKAGES_DIR = Path("./packages")
@@ -227,6 +227,7 @@ class Downloader:
         task: DistrictCourtTask,
         archive_manager: S3ArchiveManager,
         compress_pdfs: bool = True,
+        fetch_case_details: bool = True,
     ):
         self.task = task
         self.archive_manager = archive_manager
@@ -236,6 +237,8 @@ class Downloader:
         self.session_cookie = None
         # PDF compression (enabled by default if Ghostscript is available)
         self.compress_pdfs = compress_pdfs and COMPRESSION_AVAILABLE
+        # Fetch detailed case information (CNR, filing date, hearing dates, etc.)
+        self.fetch_case_details_enabled = fetch_case_details
 
     def _extract_app_token(self, html: str) -> Optional[str]:
         """Extract app_token from HTML content"""
@@ -314,7 +317,9 @@ class Downloader:
             "app_token": self.app_token,
         }
 
-        response = self._fetch_with_retry("POST", url, data=data, timeout=30, verify=False)
+        response = self._fetch_with_retry(
+            "POST", url, data=data, timeout=30, verify=False
+        )
         response.raise_for_status()
 
         result = response.json()
@@ -332,7 +337,9 @@ class Downloader:
             raise ValueError("Failed to solve CAPTCHA after 10 attempts")
 
         # Get captcha image with retry
-        captcha_url = f"{BASE_URL}vendor/securimage/securimage_show.php?{uuid.uuid4().hex}"
+        captcha_url = (
+            f"{BASE_URL}vendor/securimage/securimage_show.php?{uuid.uuid4().hex}"
+        )
         response = self._fetch_with_retry("GET", captcha_url, timeout=30, verify=False)
 
         # Save and process
@@ -358,7 +365,9 @@ class Downloader:
             logger.error(f"Error solving captcha: {e}")
             # Move to failures dir for debugging (if file exists)
             if captcha_path.exists():
-                new_path = captcha_failures_dir / f"{uuid.uuid4().hex[:8]}_{captcha_path.name}"
+                new_path = (
+                    captcha_failures_dir / f"{uuid.uuid4().hex[:8]}_{captcha_path.name}"
+                )
                 try:
                     captcha_path.rename(new_path)
                 except Exception:
@@ -388,7 +397,9 @@ class Downloader:
         }
 
         try:
-            response = self._fetch_with_retry("POST", url, data=data, timeout=60, verify=False)
+            response = self._fetch_with_retry(
+                "POST", url, data=data, timeout=60, verify=False
+            )
             response.raise_for_status()
 
             # Check if response is JSON with token update
@@ -420,8 +431,12 @@ class Downloader:
 
             return response.text
 
-        except (ConnectionError, Timeout, ChunkedEncodingError,
-                urllib3.exceptions.ProtocolError) as e:
+        except (
+            ConnectionError,
+            Timeout,
+            ChunkedEncodingError,
+            urllib3.exceptions.ProtocolError,
+        ) as e:
             logger.error(f"Network error searching orders (after retries): {e}")
             return None
         except Exception as e:
@@ -456,11 +471,25 @@ class Downloader:
                 "raw_html": str(row),
             }
 
-            # Extract data from cells
+            # Column name mapping for the order results table
+            # The table structure is: Serial | Case Number | Parties | Order Date | Order Link
+            column_names = [
+                "serial_number",
+                "case_number",
+                "parties",
+                "order_date",
+                "document_type",
+            ]
+
+            # Extract data from cells with proper field names
             for idx, cell in enumerate(cells):
                 text = cell.get_text(strip=True)
                 if text:
-                    order_data[f"cell_{idx}"] = text
+                    # Use proper field name if available, otherwise fall back to indexed name
+                    if idx < len(column_names):
+                        order_data[column_names[idx]] = text
+                    else:
+                        order_data[f"column_{idx}"] = text
 
                 # Look for links/buttons with PDF info
                 link = cell.find("a")
@@ -478,14 +507,26 @@ class Downloader:
                     if onclick:
                         order_data["onclick"] = onclick
 
+            # Parse parties into petitioner and respondent if possible
+            if order_data.get("parties"):
+                parties = order_data["parties"]
+                # Try different separator patterns: "Vs", "VS", "vs", "V/s", "v/s"
+                for separator in ["Vs", "VS", "vs", "V/s", "v/s", " v ", " V "]:
+                    if separator in parties:
+                        parts = parties.split(separator, 1)
+                        if len(parts) == 2:
+                            order_data["petitioner"] = parts[0].strip()
+                            order_data["respondent"] = parts[1].strip()
+                        break
+
             # Try to extract CNR (16-char format)
             cnr_match = re.search(r"\b([A-Z]{4}\d{12})\b", str(row))
             if cnr_match:
                 order_data["cnr"] = cnr_match.group(1)
             # If no CNR, try to use case number as unique identifier
-            elif order_data.get("cell_1"):
+            elif order_data.get("case_number"):
                 # Sanitize case number for filename: MVOP/63/2021 -> MVOP_63_2021
-                case_no = order_data["cell_1"]
+                case_no = order_data["case_number"]
                 case_id = re.sub(r"[^\w\d.-]", "_", case_no)
                 order_data["cnr"] = case_id
 
@@ -494,7 +535,492 @@ class Downloader:
 
         return results
 
-    def _fetch_with_retry(self, method: str, url: str, max_retries: int = 3, **kwargs) -> requests.Response:
+    def get_case_type_codes(self) -> Dict[str, str]:
+        """
+        Fetch case type code mapping from fillCaseType API.
+
+        Returns:
+            Dictionary mapping short code (e.g., "OS") to internal code (e.g., "17^43")
+        """
+        url = f"{BASE_URL}?p=casestatus/fillCaseType"
+
+        data = {
+            "state_code": self.task.state_code,
+            "dist_code": self.task.district_code,
+            "court_complex_code": self.task.complex_code,
+            "est_code": "",
+            "search_type": "c_no",
+            "ajax_req": "true",
+            "app_token": self.app_token,
+        }
+
+        try:
+            response = self._fetch_with_retry(
+                "POST", url, data=data, timeout=30, verify=False
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            self._update_token(result)
+
+            case_type_mapping = {}
+            casetype_html = result.get("casetype_list", "")
+
+            if casetype_html:
+                soup = BeautifulSoup(casetype_html, "lxml")
+                for option in soup.find_all("option"):
+                    value = option.get("value", "").strip()
+                    text = option.get_text(strip=True)
+
+                    if value and text:
+                        # Extract short code from text like "OS - ORIGINAL SUIT"
+                        short_code = text.split(" - ")[0].strip() if " - " in text else text
+                        case_type_mapping[short_code] = value
+
+            return case_type_mapping
+
+        except Exception as e:
+            logger.debug(f"Error fetching case type codes: {e}")
+            return {}
+
+    def search_case_status(self, case_type_code: str, case_number: str, year: str) -> List[Dict]:
+        """
+        Search Case Status by case number to get list of matching cases.
+
+        Args:
+            case_type_code: Internal case type code (e.g., "17^43" for OS)
+            case_number: Case number (e.g., "32")
+            year: Case year (e.g., "2024")
+
+        Returns:
+            List of case dictionaries with viewHistory parameters
+        """
+        url = f"{BASE_URL}?p=casestatus/submitCaseNo"
+
+        # Solve captcha for this request
+        captcha_code = self.solve_captcha()
+
+        # API parameters must match actual form submission
+        data = {
+            "state_code": self.task.state_code,
+            "dist_code": self.task.district_code,
+            "court_complex_code": self.task.complex_code,
+            "est_code": "",
+            "case_type": case_type_code,
+            "search_case_no": case_number,
+            "case_no": case_number,
+            "rgyear": year,
+            "case_captcha_code": captcha_code,
+            "ajax_req": "true",
+            "app_token": self.app_token,
+        }
+
+        try:
+            response = self._fetch_with_retry(
+                "POST", url, data=data, timeout=60, verify=False
+            )
+            response.raise_for_status()
+
+            try:
+                result = response.json()
+                self._update_token(result)
+
+                # Check for captcha error
+                if result.get("errormsg"):
+                    error_msg = result.get("errormsg", "").lower()
+                    if "captcha" in error_msg:
+                        logger.debug("Captcha error in case status search, retrying...")
+                        return self.search_case_status(case_type_code, case_number, year)
+                    logger.debug(f"Case status search error: {result.get('errormsg')}")
+                    return []
+
+                # Parse case_data HTML to extract viewHistory parameters
+                case_data_html = result.get("case_data", "")
+                if not case_data_html:
+                    return []
+
+                return self._parse_case_list(case_data_html)
+
+            except (json.JSONDecodeError, ValueError):
+                return []
+
+        except Exception as e:
+            logger.debug(f"Error in case status search: {e}")
+            return []
+
+    def _parse_case_list(self, html: str) -> List[Dict]:
+        """
+        Parse case list HTML from submitCaseNo to extract viewHistory parameters and party names.
+
+        Extracts from onclick like: viewHistory(201700000322025,'TSRA160001082025',24,'','CScaseNumber',29,9,1290105,'CScaseNumber')
+        Also extracts party names from the table row for matching purposes.
+        """
+        cases = []
+        soup = BeautifulSoup(html, "lxml")
+
+        # Find all View links with viewHistory onclick
+        for link in soup.find_all("a", onclick=True):
+            onclick = link.get("onclick", "")
+            if "viewHistory" not in onclick:
+                continue
+
+            # Parse viewHistory(case_no, cino, court_code, hideparty, search_flag, state_code, dist_code, complex_code, search_by)
+            match = re.search(
+                r"viewHistory\s*\(\s*(\d+)\s*,\s*'([^']+)'\s*,\s*(\d+)\s*,\s*'([^']*)'\s*,\s*'([^']+)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'([^']+)'\s*\)",
+                onclick,
+            )
+            if match:
+                case_info = {
+                    "internal_case_no": match.group(1),
+                    "cino": match.group(2),  # CNR number
+                    "court_code": match.group(3),
+                    "hideparty": match.group(4),
+                    "search_flag": match.group(5),
+                    "state_code": match.group(6),
+                    "dist_code": match.group(7),
+                    "court_complex_code": match.group(8),
+                    "search_by": match.group(9),
+                }
+
+                # Extract party names from the table row
+                # Table structure: <tr><td>Sr</td><td>Case</td><td>Parties</td><td><a>View</a></td></tr>
+                row = link.find_parent("tr")
+                if row:
+                    cells = row.find_all("td")
+                    if len(cells) >= 3:
+                        # Third cell contains "Petitioner<br>Vs</br>Respondent"
+                        parties_cell = cells[2]
+                        parties_text = parties_cell.get_text(separator=" ").strip()
+                        # Parse "Petitioner Vs Respondent" format (Vs may or may not have surrounding spaces)
+                        # Pattern handles: "Name Vs Name", "Name VsName", "NameVs Name", "NameVsName"
+                        vs_match = re.search(r"(.+?)\s*vs\s*(.+)", parties_text, flags=re.IGNORECASE)
+                        if vs_match:
+                            case_info["petitioner"] = vs_match.group(1).strip()
+                            case_info["respondent"] = vs_match.group(2).strip()
+                        case_info["parties"] = parties_text
+
+                cases.append(case_info)
+
+        return cases
+
+    def view_case_history(self, case_info: Dict) -> Optional[str]:
+        """
+        Get full case details by calling viewHistory API.
+
+        Args:
+            case_info: Dictionary with viewHistory parameters from _parse_case_list
+
+        Returns:
+            HTML content with full case details
+        """
+        url = f"{BASE_URL}?p=home/viewHistory"
+
+        data = {
+            "court_code": case_info.get("court_code"),
+            "state_code": case_info.get("state_code", self.task.state_code),
+            "dist_code": case_info.get("dist_code", self.task.district_code),
+            "court_complex_code": case_info.get("court_complex_code", self.task.complex_code),
+            "case_no": case_info.get("internal_case_no"),
+            "cino": case_info.get("cino"),
+            "hideparty": case_info.get("hideparty", ""),
+            "search_flag": case_info.get("search_flag", "CScaseNumber"),
+            "search_by": case_info.get("search_by", "CScaseNumber"),
+            "ajax_req": "true",
+            "app_token": self.app_token,
+        }
+
+        try:
+            response = self._fetch_with_retry(
+                "POST", url, data=data, timeout=60, verify=False
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            self._update_token(result)
+
+            if result.get("errormsg"):
+                logger.debug(f"viewHistory error: {result.get('errormsg')}")
+                return None
+
+            return result.get("data_list", "")
+
+        except Exception as e:
+            logger.debug(f"Error in viewHistory: {e}")
+            return None
+
+    def parse_case_details(self, html: str) -> dict:
+        """
+        Parse detailed case information from Case Status HTML response.
+
+        Extracts:
+        - CNR number
+        - Case type (full name)
+        - Filing number and date
+        - Registration number and date
+        - First hearing date
+        - Next hearing date
+        - Case status
+        - Case stage
+        - Court number and judge
+        - Petitioners with advocates
+        - Respondents with advocates
+        - Acts and sections
+        - Case history
+
+        Args:
+            html: HTML content from case status search
+
+        Returns:
+            Dictionary with all extracted case details
+        """
+        soup = BeautifulSoup(html, "lxml")
+        details = {}
+
+        # Helper to extract text from table cells
+        def get_cell_value(label: str) -> Optional[str]:
+            """Find a label and return the next cell's value"""
+            for td in soup.find_all("td"):
+                text = td.get_text(strip=True)
+                if label.lower() in text.lower():
+                    next_td = td.find_next_sibling("td")
+                    if next_td:
+                        return next_td.get_text(strip=True)
+            return None
+
+        # Extract CNR Number (16 character format: XXXX########YYYY)
+        cnr_pattern = r"\b([A-Z]{4}\d{12})\b"
+        cnr_match = re.search(cnr_pattern, html)
+        if cnr_match:
+            details["cnr"] = cnr_match.group(1)
+
+        # Extract from Case Details section
+        details["case_type_full"] = get_cell_value("Case Type")
+        details["filing_number"] = get_cell_value("Filing Number")
+        details["filing_date"] = get_cell_value("Filing Date")
+        details["registration_number"] = get_cell_value("Registration Number")
+        details["registration_date"] = get_cell_value("Registration Date")
+
+        # Extract from Case Status section
+        details["first_hearing_date"] = get_cell_value("First Hearing Date")
+        details["next_hearing_date"] = get_cell_value("Next Hearing Date")
+        details["case_status"] = get_cell_value("Case Status")
+        details["case_stage"] = get_cell_value("Stage of Case")
+        details["court_number_and_judge"] = get_cell_value("Court Number and Judge")
+
+        # Alternative field names
+        if not details.get("case_stage"):
+            details["case_stage"] = get_cell_value("Stage")
+        if not details.get("court_number_and_judge"):
+            details["court_number_and_judge"] = get_cell_value("Court No")
+
+        # Extract Petitioner and Advocate section
+        petitioners = []
+        pet_section = soup.find(string=re.compile(r"Petitioner.*Advocate", re.I))
+        if pet_section:
+            parent = pet_section.find_parent("div") or pet_section.find_parent("table")
+            if parent:
+                for item in parent.find_all(["li", "tr", "p"]):
+                    text = item.get_text(strip=True)
+                    if text and "petitioner" not in text.lower():
+                        petitioners.append(text)
+        if petitioners:
+            details["petitioners_with_advocates"] = petitioners
+
+        # Extract Respondent and Advocate section
+        respondents = []
+        resp_section = soup.find(string=re.compile(r"Respondent.*Advocate", re.I))
+        if resp_section:
+            parent = resp_section.find_parent("div") or resp_section.find_parent("table")
+            if parent:
+                for item in parent.find_all(["li", "tr", "p"]):
+                    text = item.get_text(strip=True)
+                    if text and "respondent" not in text.lower():
+                        respondents.append(text)
+        if respondents:
+            details["respondents_with_advocates"] = respondents
+
+        # Extract Acts section
+        acts = []
+        acts_section = soup.find(string=re.compile(r"Under Act", re.I))
+        if acts_section:
+            parent = acts_section.find_parent("table")
+            if parent:
+                rows = parent.find_all("tr")
+                for row in rows[1:]:  # Skip header row
+                    cells = row.find_all("td")
+                    if len(cells) >= 2:
+                        act = cells[0].get_text(strip=True)
+                        section = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+                        if act:
+                            acts.append({"act": act, "section": section})
+        if acts:
+            details["acts"] = acts
+
+        # Extract Case History
+        history = []
+        history_section = soup.find(string=re.compile(r"Case History", re.I))
+        if history_section:
+            parent = history_section.find_parent("table") or history_section.find_next("table")
+            if parent:
+                rows = parent.find_all("tr")
+                headers = []
+                for row in rows:
+                    cells = row.find_all(["td", "th"])
+                    if not headers:
+                        headers = [c.get_text(strip=True) for c in cells]
+                        continue
+                    if len(cells) >= 2:
+                        entry = {}
+                        for i, cell in enumerate(cells):
+                            if i < len(headers):
+                                entry[headers[i]] = cell.get_text(strip=True)
+                        if entry:
+                            history.append(entry)
+        if history:
+            details["case_history"] = history
+
+        # Clean up None values
+        return {k: v for k, v in details.items() if v is not None}
+
+    def fetch_case_details(self, order_data: dict) -> dict:
+        """
+        Fetch detailed case information for an order.
+
+        Parses the case_number (e.g., "OS/32/2024") and searches Case Status API.
+
+        Args:
+            order_data: Order data dictionary with case_number field
+
+        Returns:
+            Dictionary with detailed case information
+        """
+        case_number_full = order_data.get("case_number", "")
+        if not case_number_full:
+            return {}
+
+        # Parse case number: "OS/32/2024" -> case_type="OS", case_no="32", year="2024"
+        parts = case_number_full.split("/")
+        if len(parts) >= 3:
+            case_type = parts[0]
+            case_no = parts[1]
+            year = parts[2]
+        elif len(parts) == 2:
+            # Could be "OS/32" with year from order_date
+            case_type = parts[0]
+            case_no = parts[1]
+            order_date = order_data.get("order_date", "")
+            if order_date:
+                try:
+                    year = parse_date_from_api(order_date).year
+                except:
+                    year = datetime.now().year
+            else:
+                year = datetime.now().year
+            year = str(year)
+        else:
+            logger.debug(f"Could not parse case number: {case_number_full}")
+            return {}
+
+        # Get case type code mapping (cached after first call)
+        if not hasattr(self, "_case_type_codes"):
+            self._case_type_codes = self.get_case_type_codes()
+
+        # Look up internal case type code (e.g., "OS" -> "17^43")
+        case_type_code = self._case_type_codes.get(case_type)
+        if not case_type_code:
+            logger.debug(f"Unknown case type: {case_type}, cannot fetch details")
+            return {}
+
+        # Step 1: Search case status to get list of matching cases
+        logger.debug(f"Fetching case details for {case_type}/{case_no}/{year} (code: {case_type_code})")
+        case_list = self.search_case_status(case_type_code, case_no, year)
+
+        if not case_list:
+            logger.debug(f"No cases found for {case_number_full}")
+            return {}
+
+        # Step 2: Find the matching case from this court complex
+        # Filter by court_code that matches the task's court_numbers
+        valid_court_codes = [c.strip() for c in self.task.court_numbers.split(",")]
+        matching_cases = [c for c in case_list if c.get("court_code") in valid_court_codes]
+
+        # Use court-filtered cases if available, otherwise all cases
+        candidates = matching_cases if matching_cases else case_list
+
+        # If multiple candidates, narrow down by matching party names
+        if len(candidates) > 1:
+            order_petitioner = (order_data.get("petitioner") or "").lower().strip()
+            order_respondent = (order_data.get("respondent") or "").lower().strip()
+            order_parties = (order_data.get("parties") or "").lower().strip()
+
+            def parties_match(case_info: dict) -> bool:
+                """Check if case party names match order party names"""
+                case_petitioner = (case_info.get("petitioner") or "").lower().strip()
+                case_respondent = (case_info.get("respondent") or "").lower().strip()
+                case_parties = (case_info.get("parties") or "").lower().strip()
+
+                # Try exact match on petitioner/respondent
+                if order_petitioner and case_petitioner:
+                    if order_petitioner in case_petitioner or case_petitioner in order_petitioner:
+                        if order_respondent and case_respondent:
+                            if order_respondent in case_respondent or case_respondent in order_respondent:
+                                return True
+                        elif not order_respondent:
+                            return True
+
+                # Try matching on combined parties string
+                if order_parties and case_parties:
+                    # Normalize "vs" variations
+                    order_norm = re.sub(r"\s+", " ", order_parties.replace(" vs ", " ").replace(" v/s ", " "))
+                    case_norm = re.sub(r"\s+", " ", case_parties.replace(" vs ", " ").replace(" v/s ", " "))
+                    if order_norm in case_norm or case_norm in order_norm:
+                        return True
+
+                return False
+
+            party_matched = [c for c in candidates if parties_match(c)]
+            if len(party_matched) == 1:
+                candidates = party_matched
+                logger.debug(f"Matched case by party names: {candidates[0].get('cino')}")
+            elif len(party_matched) > 1:
+                logger.debug(f"Multiple cases ({len(party_matched)}) matched by party names, using first")
+                candidates = party_matched
+            else:
+                logger.debug(f"No party name match found among {len(candidates)} candidates")
+
+        # Select the best candidate
+        if not candidates:
+            logger.debug(f"No matching cases found for {case_number_full}")
+            return {}
+
+        case_info = candidates[0]
+        if len(candidates) > 1:
+            logger.warning(
+                f"Multiple cases ({len(candidates)}) for {case_number_full}, "
+                f"using first: CNR={case_info.get('cino')}, court={case_info.get('court_code')}"
+            )
+
+        # Fetch case history for selected case
+        html = self.view_case_history(case_info)
+        if not html:
+            logger.debug(f"No case history found for {case_number_full} (CNR: {case_info.get('cino')})")
+            return {}
+
+        # Parse the HTML
+        details = self.parse_case_details(html)
+
+        # Add CNR from case_info if not parsed
+        if not details.get("cnr") and case_info.get("cino"):
+            details["cnr"] = case_info.get("cino")
+
+        # Store raw HTML for reference
+        details["case_details_html"] = html[:10000]  # Limit size
+
+        return details
+
+    def _fetch_with_retry(
+        self, method: str, url: str, max_retries: int = 3, **kwargs
+    ) -> requests.Response:
         """Fetch URL with retry logic for network errors"""
         last_exception = None
         for attempt in range(max_retries + 1):
@@ -503,12 +1029,16 @@ class Downloader:
                     return self.session.get(url, **kwargs)
                 else:
                     return self.session.post(url, **kwargs)
-            except (ConnectionError, Timeout, ChunkedEncodingError,
-                    urllib3.exceptions.ProtocolError,
-                    requests.exceptions.RequestException) as e:
+            except (
+                ConnectionError,
+                Timeout,
+                ChunkedEncodingError,
+                urllib3.exceptions.ProtocolError,
+                requests.exceptions.RequestException,
+            ) as e:
                 last_exception = e
                 if attempt < max_retries:
-                    delay = min(1.0 * (2 ** attempt) + random.uniform(0, 1), 30.0)
+                    delay = min(1.0 * (2**attempt) + random.uniform(0, 1), 30.0)
                     logger.warning(
                         f"Network error (attempt {attempt + 1}/{max_retries + 1}): {e}. "
                         f"Retrying in {delay:.1f}s..."
@@ -527,7 +1057,9 @@ class Downloader:
         match = re.search(pattern, onclick)
 
         if not match:
-            logger.debug(f"Could not extract displayPdf parameters from: {onclick[:100]}")
+            logger.debug(
+                f"Could not extract displayPdf parameters from: {onclick[:100]}"
+            )
             return None
 
         normal_v, case_val, court_code, filename, app_flag = match.groups()
@@ -545,7 +1077,9 @@ class Downloader:
         }
 
         try:
-            response = self._fetch_with_retry("POST", url, data=data, timeout=60, verify=False)
+            response = self._fetch_with_retry(
+                "POST", url, data=data, timeout=60, verify=False
+            )
             response.raise_for_status()
 
             result = response.json()
@@ -564,10 +1098,12 @@ class Downloader:
                 pdf_url = pdf_path
 
             # Download the actual PDF with retry
-            pdf_response = self._fetch_with_retry("GET", pdf_url, timeout=120, verify=False)
+            pdf_response = self._fetch_with_retry(
+                "GET", pdf_url, timeout=120, verify=False
+            )
             if pdf_response.status_code == 200 and len(pdf_response.content) > 100:
                 # Verify it's a PDF
-                if pdf_response.content[:4] == b'%PDF':
+                if pdf_response.content[:4] == b"%PDF":
                     return pdf_response.content
                 else:
                     logger.debug(f"Response is not a PDF: {pdf_response.content[:50]}")
@@ -596,7 +1132,9 @@ class Downloader:
             original_size = len(pdf_content)
 
             # Compress the PDF
-            compressed_path = compress_pdf_if_enabled(tmp_in_path, COMPRESSION_AVAILABLE)
+            compressed_path = compress_pdf_if_enabled(
+                tmp_in_path, COMPRESSION_AVAILABLE
+            )
 
             # Read the result
             with open(compressed_path, "rb") as f:
@@ -624,14 +1162,27 @@ class Downloader:
     def process_order(self, order_data: dict) -> bool:
         """Process a single order - download PDF and save metadata"""
         cnr = order_data.get("cnr", "")
+
+        # Fetch detailed case information if enabled
+        case_details = {}
+        if self.fetch_case_details_enabled:
+            try:
+                case_details = self.fetch_case_details(order_data)
+                # Update CNR if we got a real one from case details
+                if case_details.get("cnr"):
+                    cnr = case_details["cnr"]
+                    logger.debug(f"Got CNR from case details: {cnr}")
+            except Exception as e:
+                logger.debug(f"Failed to fetch case details: {e}")
+
         if not cnr:
             # Generate a unique ID from the raw HTML
             cnr = f"UNKNOWN_{uuid.uuid4().hex[:12]}"
 
         # Extract year from order date or use task date
         try:
-            # Try to parse order date from cells
-            order_date_str = order_data.get("cell_3", "") or order_data.get("cell_2", "")
+            # Try to parse order date from order_data
+            order_date_str = order_data.get("order_date", "")
             if order_date_str:
                 order_date = parse_date_from_api(order_date_str)
                 year = order_date.year
@@ -664,10 +1215,19 @@ class Downloader:
                 "scraped_at": datetime.now(IST).isoformat(),
             }
 
-            # Add cell data
+            # Add order data fields (excluding internal fields)
+            internal_fields = {"raw_html", "onclick", "pdf_href", "cnr"}
             for key, value in order_data.items():
-                if key.startswith("cell_"):
+                if key not in internal_fields and key not in metadata:
                     metadata[key] = value
+
+            # Add detailed case information if available
+            if case_details:
+                # Exclude the raw HTML from case details to avoid bloat
+                internal_case_fields = {"case_details_html"}
+                for key, value in case_details.items():
+                    if key not in internal_case_fields and key not in metadata:
+                        metadata[key] = value
 
             self.archive_manager.add_to_archive(
                 year,
@@ -744,13 +1304,20 @@ class Downloader:
 
             # Process each order with progress bar
             downloaded = 0
-            pbar = tqdm(orders, desc=f"PDFs ({self.task.complex_name[:20]})", leave=False, unit="pdf")
+            pbar = tqdm(
+                orders,
+                desc=f"PDFs ({self.task.complex_name[:20]})",
+                leave=False,
+                unit="pdf",
+            )
             for order in pbar:
                 if self.process_order(order):
                     downloaded += 1
                     pbar.set_postfix({"new": downloaded})
 
-            logger.info(f"Downloaded {downloaded} new PDFs out of {len(orders)} orders for task: {self.task}")
+            logger.info(
+                f"Downloaded {downloaded} new PDFs out of {len(orders)} orders for task: {self.task}"
+            )
 
             # Mark task as completed
             save_completed_task(get_task_key(self.task))
@@ -838,7 +1405,7 @@ def main():
     parser.add_argument(
         "--day_step",
         type=int,
-        default=2100, # Large default to minimize chunks & districts has no pagination & ~5yrs data
+        default=2100,  # Large default to minimize chunks & districts has no pagination & ~5yrs data
         help="Number of days per chunk",
     )
     parser.add_argument(
@@ -895,6 +1462,18 @@ def main():
         default=False,
         help="Disable PDF compression (compression is enabled by default)",
     )
+    parser.add_argument(
+        "--upload-local",
+        action="store_true",
+        default=False,
+        help="Upload existing local TAR files to S3 (no downloading)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Show what would be uploaded without actually uploading (use with --upload-local)",
+    )
     args = parser.parse_args()
 
     # Handle PDF compression settings
@@ -903,7 +1482,9 @@ def main():
         if COMPRESSION_AVAILABLE:
             logger.info("PDF compression enabled (using Ghostscript)")
         else:
-            logger.warning("PDF compression requested but Ghostscript not available - compression disabled")
+            logger.warning(
+                "PDF compression requested but Ghostscript not available - compression disabled"
+            )
             compress_pdfs = False
     else:
         logger.info("PDF compression disabled (--no-compress flag)")
@@ -932,7 +1513,19 @@ def main():
 
     logger.info(f"Processing {len(courts)} court complexes")
 
-    if args.sync_s3_fill:
+    if args.upload_local:
+        from upload_local import run_upload_local
+
+        run_upload_local(
+            s3_bucket=S3_BUCKET,
+            s3_prefix=S3_PREFIX,
+            local_dir=LOCAL_DIR,
+            state_code=args.state_code,
+            district_code=args.district_code,
+            complex_code=args.complex_code,
+            dry_run=args.dry_run,
+        )
+    elif args.sync_s3_fill:
         from sync_s3_fill import sync_s3_fill_gaps
 
         sync_s3_fill_gaps(

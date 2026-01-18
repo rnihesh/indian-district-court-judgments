@@ -28,7 +28,7 @@ This project scrapes and archives Indian District Court judgments from services.
 All archives use uncompressed TAR format (`.tar`).
 
 ```
-indian-district-court-judgments/
+indian-district-court-judgments-test/
 ├── data/
 │   └── tar/
 │       └── year=YYYY/state=XX/district=YY/complex=ZZ/
@@ -48,7 +48,7 @@ indian-district-court-judgments/
 
 Key constants in `download.py`:
 
-- `S3_BUCKET`: Target S3 bucket (default: `indian-district-court-judgments`)
+- `S3_BUCKET`: Target S3 bucket (default: `indian-district-court-judgments-test`)
 - `S3_PREFIX`: S3 prefix (default: empty)
 - `LOCAL_DIR`: Local directory for temporary files (default: `./local_dc_judgments_data`)
 - `BASE_URL`: eCourts API base URL (`https://services.ecourts.gov.in/ecourtindia_v6/`)
@@ -151,6 +151,7 @@ Each archive has an accompanying `.index.json` file:
 - **3,567 Court Complexes**
 
 Data in `courts.csv` with columns:
+
 - `state_code`, `state_name`
 - `district_code`, `district_name`
 - `complex_code`, `complex_name`
@@ -188,13 +189,13 @@ Metadata processing:
 
 ### API Endpoints
 
-| Endpoint | Purpose |
-|----------|---------|
-| `?p=casestatus/fillDistrict` | Get districts for a state |
-| `?p=casestatus/fillcomplex` | Get court complexes for a district |
-| `?p=casestatus/set_data` | Set session court context |
-| `?p=courtorder/submitOrderDate` | Search orders by date |
-| `?p=home/display_pdf` | Get PDF download URL |
+| Endpoint                        | Purpose                            |
+| ------------------------------- | ---------------------------------- |
+| `?p=casestatus/fillDistrict`    | Get districts for a state          |
+| `?p=casestatus/fillcomplex`     | Get court complexes for a district |
+| `?p=casestatus/set_data`        | Set session court context          |
+| `?p=courtorder/submitOrderDate` | Search orders by date              |
+| `?p=home/display_pdf`           | Get PDF download URL               |
 
 ### Session Management
 

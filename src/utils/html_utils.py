@@ -167,6 +167,16 @@ def parse_order_search_results(html: str) -> List[Dict]:
 
         order_data = {}
 
+        # Column name mapping for the order results table
+        # The table structure is: Serial | Case Number | Parties | Order Date | Order Link
+        column_names = [
+            "serial_number",
+            "case_number",
+            "parties",
+            "order_date",
+            "document_type",
+        ]
+
         # Extract data from cells - structure varies by response
         for idx, cell in enumerate(cells):
             # Look for links to order PDFs
@@ -185,10 +195,13 @@ def parse_order_search_results(html: str) -> List[Dict]:
                 if onclick:
                     order_data["onclick"] = onclick
 
-            # Extract text content
+            # Extract text content with proper field names
             text = cell.get_text(strip=True)
             if text:
-                order_data[f"cell_{idx}"] = text
+                if idx < len(column_names):
+                    order_data[column_names[idx]] = text
+                else:
+                    order_data[f"column_{idx}"] = text
 
         if order_data:
             order_data["raw_html"] = str(row)

@@ -141,7 +141,8 @@ def sync_s3_fill_gaps(
     """
     Fill historical gaps in S3 data.
 
-    Processes ONE chunk (default 5 years) per run.
+    Processes chunks (default 5 years each) continuously until timeout.
+    Skips empty chunks automatically and moves to the next.
     Automatically resumes from where it left off.
     """
     from archive_manager import S3ArchiveManager
@@ -151,91 +152,105 @@ def sync_s3_fill_gaps(
     # Set up graceful exit handler
     graceful_exit = GracefulExit(timeout_hours)
 
-    # Get next chunk to process
-    chunk = get_next_chunk(start_date, end_date)
-    if chunk is None:
-        logger.info("Historical backfill complete!")
-        return
+    # Track all changes across chunks for final parquet processing
+    all_years_processed = set()
+    states_to_process = list(set(c.state_code for c in courts))
+    total_files_uploaded = 0
 
-    chunk_start, chunk_end = chunk
-    logger.info(f"Processing chunk: {chunk_start} to {chunk_end}")
+    # Process chunks until timeout or complete
+    while True:
+        # Check for timeout
+        if graceful_exit.check_timeout():
+            logger.info("Timeout reached, stopping...")
+            break
 
-    # Track changes
-    all_changes = {}
+        # Get next chunk to process
+        chunk = get_next_chunk(start_date, end_date)
+        if chunk is None:
+            logger.info("Historical backfill complete!")
+            break
 
-    try:
-        with S3ArchiveManager(
-            s3_bucket, s3_prefix, local_dir, immediate_upload=True
-        ) as archive_manager:
-            # Check for early exit
-            if graceful_exit.check_timeout():
-                logger.info("Timeout before processing started")
-                return
+        # Only use provided dates for first chunk
+        start_date = None
+        end_date = None
 
-            # Run the downloader
-            logger.info(f"Downloading data for {chunk_start} to {chunk_end}...")
+        chunk_start, chunk_end = chunk
+        logger.info(f"Processing chunk: {chunk_start} to {chunk_end}")
 
-            run(
-                courts=courts,
-                start_date=chunk_start,
-                end_date=chunk_end,
-                day_step=day_step,
-                max_workers=max_workers,
-                archive_manager=archive_manager,
-                compress_pdfs=compress_pdfs,
+        chunk_has_data = False
+
+        try:
+            with S3ArchiveManager(
+                s3_bucket, s3_prefix, local_dir, immediate_upload=True
+            ) as archive_manager:
+                # Run the downloader
+                logger.info(f"Downloading data for {chunk_start} to {chunk_end}...")
+
+                run(
+                    courts=courts,
+                    start_date=chunk_start,
+                    end_date=chunk_end,
+                    day_step=day_step,
+                    max_workers=max_workers,
+                    archive_manager=archive_manager,
+                    compress_pdfs=compress_pdfs,
+                )
+
+                all_changes = archive_manager.get_all_changes()
+
+                if all_changes:
+                    chunk_has_data = True
+                    for location, archives in all_changes.items():
+                        for archive_type, files in archives.items():
+                            total_files_uploaded += len(files)
+                            logger.info(f"  {location}/{archive_type}: {len(files)} files")
+
+                    # Track years for parquet processing
+                    start_year = datetime.strptime(chunk_start, "%Y-%m-%d").year
+                    end_year = datetime.strptime(chunk_end, "%Y-%m-%d").year
+                    for year in range(start_year, end_year + 1):
+                        all_years_processed.add(str(year))
+
+            # Update tracking on success
+            update_tracking(chunk_end)
+
+            if chunk_has_data:
+                logger.info(f"Chunk complete with data: {chunk_start} to {chunk_end}")
+            else:
+                logger.info(f"Chunk empty (no data): {chunk_start} to {chunk_end}, moving to next...")
+
+        except KeyboardInterrupt:
+            logger.info("Interrupted by user")
+            break
+        except Exception as e:
+            logger.error(f"Error processing chunk: {e}")
+            import traceback
+            traceback.print_exc()
+            break
+
+    # Process metadata to parquet for all years that had data
+    if all_years_processed:
+        logger.info(f"\nProcessing metadata to parquet for years: {sorted(all_years_processed)}")
+
+        try:
+            processor = DistrictCourtMetadataProcessor(
+                s3_bucket=s3_bucket,
+                s3_prefix=s3_prefix,
+                years_to_process=list(all_years_processed),
+                states_to_process=states_to_process,
             )
 
-            all_changes = archive_manager.get_all_changes()
+            processed_years, total_records = processor.process_bucket_metadata()
 
-        # Update tracking on success
-        update_tracking(chunk_end)
-        logger.info(f"Chunk complete: {chunk_start} to {chunk_end}")
+            if total_records > 0:
+                logger.info(f"Successfully processed {total_records} records to parquet")
 
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"Error processing chunk: {e}")
-        import traceback
-
-        traceback.print_exc()
-        sys.exit(1)
-
-    # Log summary
-    if all_changes:
-        logger.info("\nChunk Summary:")
-        logger.info(f"  Date range: {chunk_start} to {chunk_end}")
-        for location, archives in all_changes.items():
-            logger.info(f"  {location}:")
-            for archive_type, files in archives.items():
-                logger.info(f"    {archive_type}: {len(files)} files")
-
-    # Process metadata to parquet
-    logger.info("Processing metadata to parquet format...")
-
-    try:
-        start_year = datetime.strptime(chunk_start, "%Y-%m-%d").year
-        end_year = datetime.strptime(chunk_end, "%Y-%m-%d").year
-        years_to_process = [str(year) for year in range(start_year, end_year + 1)]
-        states_to_process = list(set(c.state_code for c in courts))
-
-        processor = DistrictCourtMetadataProcessor(
-            s3_bucket=s3_bucket,
-            s3_prefix=s3_prefix,
-            years_to_process=years_to_process,
-            states_to_process=states_to_process,
-        )
-
-        processed_years, total_records = processor.process_bucket_metadata()
-
-        if total_records > 0:
-            logger.info(f"Successfully processed {total_records} records to parquet")
-
-    except Exception as e:
-        logger.error(f"Error processing metadata to parquet: {e}")
-        import traceback
-
-        traceback.print_exc()
+        except Exception as e:
+            logger.error(f"Error processing metadata to parquet: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        logger.info("No data was uploaded, skipping parquet processing")
 
     # Clean up local directory
     import shutil
@@ -244,9 +259,13 @@ def sync_s3_fill_gaps(
         shutil.rmtree(local_dir)
         logger.info(f"Cleaned up local directory: {local_dir}")
 
+    # Summary
+    logger.info(f"\n=== Fill Summary ===")
+    logger.info(f"Total files uploaded: {total_files_uploaded}")
+
     # Show next chunk info
     next_chunk = get_next_chunk()
     if next_chunk:
-        logger.info(f"\nNext run will process: {next_chunk[0]} to {next_chunk[1]}")
+        logger.info(f"Next run will continue from: {next_chunk[0]} to {next_chunk[1]}")
     else:
-        logger.info("\nAll historical data has been processed!")
+        logger.info("All historical data has been processed!")

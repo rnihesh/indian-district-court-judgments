@@ -28,7 +28,7 @@ local_dc_judgments_data/
 **S3 storage** (when using --sync-s3):
 
 ```
-s3://indian-district-court-judgments/
+s3://indian-district-court-judgments-test/
 ├── data/
 │   └── tar/
 │       └── year={YYYY}/state={code}/district={code}/complex={code}/
@@ -76,6 +76,7 @@ Each archive has an accompanying `.index.json` file:
 **Multi-part Archives:**
 
 When archives exceed 1GB, they are automatically split into parts:
+
 - First part: `orders.tar`
 - Subsequent parts: `part-20250114T192547.tar`, etc.
 
@@ -87,8 +88,8 @@ Requires Python 3.13+ and [uv](https://github.com/astral-sh/uv) package manager.
 
 ```bash
 # Clone the repository
-git clone https://github.com/vanga/indian-district-court-judgments.git
-cd indian-district-court-judgments
+git clone https://github.com/vanga/indian-district-court-judgments-test.git
+cd indian-district-court-judgments-test
 
 # Install dependencies
 uv sync
@@ -121,6 +122,7 @@ uv run python scrape_courts.py --state 29
 ```
 
 This creates `courts.csv` with columns:
+
 - `state_code`, `state_name`
 - `district_code`, `district_name`
 - `complex_code`, `complex_name`
@@ -194,50 +196,50 @@ This reads metadata TAR files from S3 and generates Parquet files at:
 
 ### Command Line Options
 
-| Option | Description |
-|--------|-------------|
-| `--start_date` | Start date in YYYY-MM-DD format |
-| `--end_date` | End date in YYYY-MM-DD format |
-| `--day_step` | Days per chunk (default: 1) |
-| `--max_workers` | Parallel workers (default: 2, to avoid rate limiting) |
-| `--state_code` | Filter by state code |
-| `--district_code` | Filter by district code |
-| `--complex_code` | Filter by complex code |
-| `--courts_csv` | Path to courts.csv (default: courts.csv) |
-| `--sync-s3` | Enable S3 sync mode |
-| `--sync-s3-fill` | Enable historical backfill mode |
-| `--timeout-hours` | Max runtime before graceful exit (default: 5.5) |
+| Option            | Description                                           |
+| ----------------- | ----------------------------------------------------- |
+| `--start_date`    | Start date in YYYY-MM-DD format                       |
+| `--end_date`      | End date in YYYY-MM-DD format                         |
+| `--day_step`      | Days per chunk (default: 1)                           |
+| `--max_workers`   | Parallel workers (default: 2, to avoid rate limiting) |
+| `--state_code`    | Filter by state code                                  |
+| `--district_code` | Filter by district code                               |
+| `--complex_code`  | Filter by complex code                                |
+| `--courts_csv`    | Path to courts.csv (default: courts.csv)              |
+| `--sync-s3`       | Enable S3 sync mode                                   |
+| `--sync-s3-fill`  | Enable historical backfill mode                       |
+| `--timeout-hours` | Max runtime before graceful exit (default: 5.5)       |
 
 ## State Codes
 
 All state/UT codes (from `courts.csv`):
 
-| Code | State | Code | State |
-|------|-------|------|-------|
-| 1 | Maharashtra | 20 | Tripura |
-| 2 | Andhra Pradesh | 21 | Meghalaya |
-| 3 | Karnataka | 22 | Punjab |
-| 4 | Kerala | 23 | Madhya Pradesh |
-| 5 | Himachal Pradesh | 24 | Sikkim |
-| 6 | Assam | 25 | Manipur |
-| 7 | Jharkhand | 26 | Delhi |
-| 8 | Bihar | 27 | Chandigarh |
-| 9 | Rajasthan | 28 | Andaman and Nicobar |
-| 10 | Tamil Nadu | 29 | Telangana |
-| 11 | Odisha | 30 | Goa |
-| 12 | Jammu and Kashmir | 33 | Ladakh |
-| 13 | Uttar Pradesh | 34 | Nagaland |
-| 14 | Haryana | 35 | Puducherry |
-| 15 | Uttarakhand | 36 | Arunachal Pradesh |
-| 16 | West Bengal | 37 | Lakshadweep |
-| 17 | Gujarat | 38 | Dadra Nagar Haveli & Daman Diu |
-| 18 | Chhattisgarh | | |
-| 19 | Mizoram | | |
+| Code | State             | Code | State                          |
+| ---- | ----------------- | ---- | ------------------------------ |
+| 1    | Maharashtra       | 20   | Tripura                        |
+| 2    | Andhra Pradesh    | 21   | Meghalaya                      |
+| 3    | Karnataka         | 22   | Punjab                         |
+| 4    | Kerala            | 23   | Madhya Pradesh                 |
+| 5    | Himachal Pradesh  | 24   | Sikkim                         |
+| 6    | Assam             | 25   | Manipur                        |
+| 7    | Jharkhand         | 26   | Delhi                          |
+| 8    | Bihar             | 27   | Chandigarh                     |
+| 9    | Rajasthan         | 28   | Andaman and Nicobar            |
+| 10   | Tamil Nadu        | 29   | Telangana                      |
+| 11   | Odisha            | 30   | Goa                            |
+| 12   | Jammu and Kashmir | 33   | Ladakh                         |
+| 13   | Uttar Pradesh     | 34   | Nagaland                       |
+| 14   | Haryana           | 35   | Puducherry                     |
+| 15   | Uttarakhand       | 36   | Arunachal Pradesh              |
+| 16   | West Bengal       | 37   | Lakshadweep                    |
+| 17   | Gujarat           | 38   | Dadra Nagar Haveli & Daman Diu |
+| 18   | Chhattisgarh      |      |                                |
+| 19   | Mizoram           |      |                                |
 
 ## Architecture
 
 ```
-indian-district-court-judgments/
+indian-district-court-judgments-test/
 ├── pyproject.toml          # Dependencies
 ├── courts.csv              # Court hierarchy (generated)
 ├── scrape_courts.py        # Court hierarchy scraper
@@ -260,13 +262,13 @@ indian-district-court-judgments/
 
 The scraper interacts with the following eCourts API endpoints:
 
-| Endpoint | Purpose |
-|----------|---------|
-| `?p=casestatus/fillDistrict` | Get districts for a state |
-| `?p=casestatus/fillcomplex` | Get court complexes for a district |
-| `?p=casestatus/set_data` | Set session court context |
-| `?p=courtorder/submitOrderDate` | Search orders by date |
-| `?p=home/display_pdf` | Get PDF download URL |
+| Endpoint                        | Purpose                            |
+| ------------------------------- | ---------------------------------- |
+| `?p=casestatus/fillDistrict`    | Get districts for a state          |
+| `?p=casestatus/fillcomplex`     | Get court complexes for a district |
+| `?p=casestatus/set_data`        | Set session court context          |
+| `?p=courtorder/submitOrderDate` | Search orders by date              |
+| `?p=home/display_pdf`           | Get PDF download URL               |
 
 ## Metadata Fields
 

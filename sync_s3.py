@@ -134,35 +134,54 @@ def run_sync_s3(
 ):
     """
     Run the sync-s3 operation: check latest date in S3 and download new data.
+
+    If start_date is provided, uses it directly (skips S3 auto-detection).
+    If start_date is not provided, auto-detects from S3 metadata.
     """
     from archive_manager import S3ArchiveManager
     from download import run
     from process_metadata import DistrictCourtMetadataProcessor
 
-    logger.info("Checking latest date from S3 metadata...")
-
     # Get unique states from courts
     states = set(c.state_code for c in courts)
-
-    # Find the earliest latest date across all states
-    overall_latest = None
-    for state_code in states:
-        state_latest = get_latest_index_date(s3_bucket, state_code)
-        if state_latest is None:
-            state_latest = get_latest_metadata_date_from_tar(s3_bucket, state_code)
-
-        if state_latest:
-            if overall_latest is None or state_latest < overall_latest:
-                overall_latest = state_latest
-
-    if overall_latest is None:
-        # No existing data, start from beginning of current year
-        overall_latest = datetime(datetime.now().year, 1, 1)
-        logger.info("No existing data found, starting from beginning of year")
-    else:
-        logger.info(f"Latest date in S3: {overall_latest.date()}")
-
     today = datetime.now().date()
+
+    # Determine date range
+    if start_date:
+        # User provided explicit dates - use them directly
+        actual_start = start_date
+        actual_end = end_date if end_date else today.strftime("%Y-%m-%d")
+        logger.info(f"Using provided date range: {actual_start} to {actual_end}")
+    else:
+        # Auto-detect from S3
+        logger.info("Checking latest date from S3 metadata...")
+
+        overall_latest = None
+        for state_code in states:
+            state_latest = get_latest_index_date(s3_bucket, state_code)
+            if state_latest is None:
+                state_latest = get_latest_metadata_date_from_tar(s3_bucket, state_code)
+
+            if state_latest:
+                if overall_latest is None or state_latest < overall_latest:
+                    overall_latest = state_latest
+
+        if overall_latest is None:
+            # No existing data, start from beginning of current year
+            overall_latest = datetime(datetime.now().year, 1, 1)
+            logger.info("No existing data found, starting from beginning of year")
+        else:
+            logger.info(f"Latest date in S3: {overall_latest.date()}")
+
+        # Check if we're up to date
+        if overall_latest.date() >= today:
+            logger.info("Data is up-to-date. No new downloads needed.")
+            actual_start = None  # Signal no download needed
+            actual_end = None
+        else:
+            actual_start = (overall_latest.date() + timedelta(days=1)).strftime("%Y-%m-%d")
+            actual_end = today.strftime("%Y-%m-%d")
+            logger.info(f"New data available from {actual_start} to {actual_end}")
 
     # Track changes
     changes_made = False
@@ -171,21 +190,12 @@ def run_sync_s3(
     with S3ArchiveManager(
         s3_bucket, s3_prefix, local_dir, immediate_upload=True
     ) as archive_manager:
-        # Check if we're up to date
-        if overall_latest.date() >= today:
-            logger.info("Data is up-to-date. No new downloads needed.")
-        else:
-            logger.info(
-                f"New data available from {overall_latest.date() + timedelta(days=1)} to {today}"
-            )
-
+        if actual_start and actual_end:
             # Run the downloader
             run(
                 courts=courts,
-                start_date=(overall_latest.date() + timedelta(days=1)).strftime(
-                    "%Y-%m-%d"
-                ),
-                end_date=today.strftime("%Y-%m-%d"),
+                start_date=actual_start,
+                end_date=actual_end,
                 day_step=day_step,
                 max_workers=max_workers,
                 archive_manager=archive_manager,
@@ -199,21 +209,20 @@ def run_sync_s3(
     # Log summary
     if changes_made and all_changes:
         logger.info("\nSync Summary:")
-        logger.info(
-            f"  Date range: {overall_latest.date() + timedelta(days=1)} to {today}"
-        )
+        logger.info(f"  Date range: {actual_start} to {actual_end}")
         for location, archives in all_changes.items():
             logger.info(f"  {location}:")
             for archive_type, files in archives.items():
                 logger.info(f"    {archive_type}: {len(files)} files")
 
     # Process metadata to parquet
-    if overall_latest.date() < today:
+    if changes_made:
         logger.info("Processing newly downloaded metadata to parquet format...")
 
         try:
-            start_year = overall_latest.year
-            end_year = today.year
+            # Parse years from actual dates
+            start_year = int(actual_start.split("-")[0])
+            end_year = int(actual_end.split("-")[0])
             years_to_process = [str(year) for year in range(start_year, end_year + 1)]
             states_to_process = list(states)
 
@@ -241,9 +250,11 @@ def run_sync_s3(
     else:
         logger.info("No new data to process to parquet format")
 
-    # Clean up local directory
+    # Clean up local directory only if we made changes (uploaded data)
     import shutil
 
-    if local_dir.exists():
+    if changes_made and local_dir.exists():
         shutil.rmtree(local_dir)
         logger.info(f"Cleaned up local directory: {local_dir}")
+    elif local_dir.exists():
+        logger.warning(f"Local directory NOT cleaned up (no sync performed): {local_dir}")

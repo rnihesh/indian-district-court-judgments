@@ -285,7 +285,7 @@ wheels = [
 ]
 
 [[package]]
-name = "indian-district-court-judgments"
+name = "indian-district-court-judgments-test"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

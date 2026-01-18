@@ -1,5 +1,5 @@
 [project]
-name = "indian-district-court-judgments"
+name = "indian-district-court-judgments-test"
 version = "0.1.0"
 description = "Scraper for Indian District Court judgments from services.ecourts.gov.in"
 readme = "README.md"

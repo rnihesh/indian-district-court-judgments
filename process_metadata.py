@@ -99,13 +99,15 @@ class DistrictCourtMetadataProcessor:
                     if self.states_to_process and state not in self.states_to_process:
                         continue
 
-                    tars.append({
-                        "key": key,
-                        "year": year,
-                        "state": state,
-                        "district": district,
-                        "complex": complex_code,
-                    })
+                    tars.append(
+                        {
+                            "key": key,
+                            "year": year,
+                            "state": state,
+                            "district": district,
+                            "complex": complex_code,
+                        }
+                    )
 
         return tars
 
@@ -188,21 +190,76 @@ class DistrictCourtMetadataProcessor:
                 "scraped_at": metadata.get("scraped_at", ""),
             }
 
-            # Extract additional fields from HTML
-            processed["order_date"] = DistrictCourtMetadataProcessor.extract_date_from_html(
-                raw_html
+            # Use structured fields if available, otherwise extract from HTML
+            # New format fields (proper names)
+            processed["serial_number"] = metadata.get("serial_number", "")
+            processed["case_number"] = metadata.get("case_number", "")
+            processed["parties"] = metadata.get("parties", "")
+            processed["document_type"] = metadata.get("document_type", "")
+
+            # Petitioner/respondent - prefer structured data, fall back to HTML extraction
+            processed["petitioner"] = metadata.get(
+                "petitioner",
+                DistrictCourtMetadataProcessor.extract_petitioner(raw_html),
             )
+            processed["respondent"] = metadata.get(
+                "respondent",
+                DistrictCourtMetadataProcessor.extract_respondent(raw_html),
+            )
+
+            # Order date - prefer structured data, fall back to HTML extraction
+            processed["order_date"] = metadata.get(
+                "order_date",
+                DistrictCourtMetadataProcessor.extract_date_from_html(raw_html),
+            )
+
+            # Case type - extract from HTML or case number
             processed["case_type"] = DistrictCourtMetadataProcessor.extract_case_type(
                 raw_html
             )
-            processed["petitioner"] = DistrictCourtMetadataProcessor.extract_petitioner(
-                raw_html
-            )
-            processed["respondent"] = DistrictCourtMetadataProcessor.extract_respondent(
-                raw_html
-            )
 
-            # Add cell data if available
+            # Case detail fields from viewHistory API (if available)
+            processed["case_type_full"] = metadata.get("case_type_full", "")
+            processed["filing_number"] = metadata.get("filing_number", "")
+            processed["filing_date"] = metadata.get("filing_date", "")
+            processed["registration_number"] = metadata.get("registration_number", "")
+            processed["registration_date"] = metadata.get("registration_date", "")
+            processed["first_hearing_date"] = metadata.get("first_hearing_date", "")
+            processed["next_hearing_date"] = metadata.get("next_hearing_date", "")
+            processed["case_stage"] = metadata.get("case_stage", "")
+            processed["court_number_and_judge"] = metadata.get("court_number_and_judge", "")
+            processed["case_status"] = metadata.get("case_status", "")
+
+            # Complex fields - convert lists/dicts to JSON strings for parquet
+            acts = metadata.get("acts", "")
+            if isinstance(acts, list):
+                processed["acts"] = json.dumps(acts, ensure_ascii=False)
+            else:
+                processed["acts"] = acts if acts else ""
+
+            petitioners = metadata.get("petitioners_with_advocates", "")
+            if isinstance(petitioners, list):
+                processed["petitioners_with_advocates"] = json.dumps(
+                    petitioners, ensure_ascii=False
+                )
+            else:
+                processed["petitioners_with_advocates"] = petitioners if petitioners else ""
+
+            respondents = metadata.get("respondents_with_advocates", "")
+            if isinstance(respondents, list):
+                processed["respondents_with_advocates"] = json.dumps(
+                    respondents, ensure_ascii=False
+                )
+            else:
+                processed["respondents_with_advocates"] = respondents if respondents else ""
+
+            case_history = metadata.get("case_history", "")
+            if isinstance(case_history, list):
+                processed["case_history"] = json.dumps(case_history, ensure_ascii=False)
+            else:
+                processed["case_history"] = case_history if case_history else ""
+
+            # Backward compatibility: also include cell_* fields if present (for old data)
             for i in range(10):
                 cell_key = f"cell_{i}"
                 if cell_key in metadata:
@@ -263,14 +320,14 @@ class DistrictCourtMetadataProcessor:
         if not tars:
             return [], 0
 
-        # Group by year/state for Parquet output
+        # Group by year/state/district/complex for Parquet output (full granularity)
         records_by_key = {}
         total_records = 0
 
         for tar_info in tars:
             records = self.process_tar_file(tar_info)
             if records:
-                key = (tar_info["year"], tar_info["state"])
+                key = (tar_info["year"], tar_info["state"], tar_info["district"], tar_info["complex"])
                 if key not in records_by_key:
                     records_by_key[key] = []
                 records_by_key[key].extend(records)
@@ -279,11 +336,11 @@ class DistrictCourtMetadataProcessor:
                     f"Processed {len(records)} records from {tar_info['year']}/{tar_info['state']}/{tar_info['district']}/{tar_info['complex']}"
                 )
 
-        # Generate Parquet files
+        # Generate Parquet files at complex level
         processed_years = set()
         s3_write = boto3.client("s3")
 
-        for (year, state), records in records_by_key.items():
+        for (year, state, district, complex_code), records in records_by_key.items():
             if not records:
                 continue
 
@@ -293,8 +350,8 @@ class DistrictCourtMetadataProcessor:
             if "cnr" in df.columns:
                 df = df.drop_duplicates(subset=["cnr"], keep="last")
 
-            # Output path
-            parquet_key = f"metadata/parquet/year={year}/state={state}/metadata.parquet"
+            # Output path at complex level
+            parquet_key = f"metadata/parquet/year={year}/state={state}/district={district}/complex={complex_code}/metadata.parquet"
 
             # Write to temp file and upload
             with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
@@ -318,7 +375,7 @@ def main():
     parser.add_argument(
         "--bucket",
         type=str,
-        default="indian-district-court-judgments",
+        default="indian-district-court-judgments-test",
         help="S3 bucket name",
     )
     parser.add_argument(
