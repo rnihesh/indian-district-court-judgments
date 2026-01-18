@@ -79,7 +79,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Check if Ghostscript is available for PDF compression
 COMPRESSION_AVAILABLE = check_ghostscript_available()
 if not COMPRESSION_AVAILABLE:
-    print("WARNING: PDF compression not available (Ghostscript not found)")
+    logger.warning("PDF compression not available (Ghostscript not found)")
 
 # Configuration
 BASE_URL = "https://services.ecourts.gov.in/ecourtindia_v6/"
@@ -574,7 +574,9 @@ class Downloader:
 
                     if value and text:
                         # Extract short code from text like "OS - ORIGINAL SUIT"
-                        short_code = text.split(" - ")[0].strip() if " - " in text else text
+                        short_code = (
+                            text.split(" - ")[0].strip() if " - " in text else text
+                        )
                         case_type_mapping[short_code] = value
 
             return case_type_mapping
@@ -583,7 +585,9 @@ class Downloader:
             logger.debug(f"Error fetching case type codes: {e}")
             return {}
 
-    def search_case_status(self, case_type_code: str, case_number: str, year: str) -> List[Dict]:
+    def search_case_status(
+        self, case_type_code: str, case_number: str, year: str
+    ) -> List[Dict]:
         """
         Search Case Status by case number to get list of matching cases.
 
@@ -630,7 +634,9 @@ class Downloader:
                     error_msg = result.get("errormsg", "").lower()
                     if "captcha" in error_msg:
                         logger.debug("Captcha error in case status search, retrying...")
-                        return self.search_case_status(case_type_code, case_number, year)
+                        return self.search_case_status(
+                            case_type_code, case_number, year
+                        )
                     logger.debug(f"Case status search error: {result.get('errormsg')}")
                     return []
 
@@ -693,7 +699,9 @@ class Downloader:
                         parties_text = parties_cell.get_text(separator=" ").strip()
                         # Parse "Petitioner Vs Respondent" format (Vs may or may not have surrounding spaces)
                         # Pattern handles: "Name Vs Name", "Name VsName", "NameVs Name", "NameVsName"
-                        vs_match = re.search(r"(.+?)\s*vs\s*(.+)", parties_text, flags=re.IGNORECASE)
+                        vs_match = re.search(
+                            r"(.+?)\s*vs\s*(.+)", parties_text, flags=re.IGNORECASE
+                        )
                         if vs_match:
                             case_info["petitioner"] = vs_match.group(1).strip()
                             case_info["respondent"] = vs_match.group(2).strip()
@@ -719,7 +727,9 @@ class Downloader:
             "court_code": case_info.get("court_code"),
             "state_code": case_info.get("state_code", self.task.state_code),
             "dist_code": case_info.get("dist_code", self.task.district_code),
-            "court_complex_code": case_info.get("court_complex_code", self.task.complex_code),
+            "court_complex_code": case_info.get(
+                "court_complex_code", self.task.complex_code
+            ),
             "case_no": case_info.get("internal_case_no"),
             "cino": case_info.get("cino"),
             "hideparty": case_info.get("hideparty", ""),
@@ -830,7 +840,9 @@ class Downloader:
         respondents = []
         resp_section = soup.find(string=re.compile(r"Respondent.*Advocate", re.I))
         if resp_section:
-            parent = resp_section.find_parent("div") or resp_section.find_parent("table")
+            parent = resp_section.find_parent("div") or resp_section.find_parent(
+                "table"
+            )
             if parent:
                 for item in parent.find_all(["li", "tr", "p"]):
                     text = item.get_text(strip=True)
@@ -850,7 +862,9 @@ class Downloader:
                     cells = row.find_all("td")
                     if len(cells) >= 2:
                         act = cells[0].get_text(strip=True)
-                        section = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+                        section = (
+                            cells[1].get_text(strip=True) if len(cells) > 1 else ""
+                        )
                         if act:
                             acts.append({"act": act, "section": section})
         if acts:
@@ -860,7 +874,9 @@ class Downloader:
         history = []
         history_section = soup.find(string=re.compile(r"Case History", re.I))
         if history_section:
-            parent = history_section.find_parent("table") or history_section.find_next("table")
+            parent = history_section.find_parent("table") or history_section.find_next(
+                "table"
+            )
             if parent:
                 rows = parent.find_all("tr")
                 headers = []
@@ -932,7 +948,9 @@ class Downloader:
             return {}
 
         # Step 1: Search case status to get list of matching cases
-        logger.debug(f"Fetching case details for {case_type}/{case_no}/{year} (code: {case_type_code})")
+        logger.debug(
+            f"Fetching case details for {case_type}/{case_no}/{year} (code: {case_type_code})"
+        )
         case_list = self.search_case_status(case_type_code, case_no, year)
 
         if not case_list:
@@ -942,7 +960,9 @@ class Downloader:
         # Step 2: Find the matching case from this court complex
         # Filter by court_code that matches the task's court_numbers
         valid_court_codes = [c.strip() for c in self.task.court_numbers.split(",")]
-        matching_cases = [c for c in case_list if c.get("court_code") in valid_court_codes]
+        matching_cases = [
+            c for c in case_list if c.get("court_code") in valid_court_codes
+        ]
 
         # Use court-filtered cases if available, otherwise all cases
         candidates = matching_cases if matching_cases else case_list
@@ -961,9 +981,15 @@ class Downloader:
 
                 # Try exact match on petitioner/respondent
                 if order_petitioner and case_petitioner:
-                    if order_petitioner in case_petitioner or case_petitioner in order_petitioner:
+                    if (
+                        order_petitioner in case_petitioner
+                        or case_petitioner in order_petitioner
+                    ):
                         if order_respondent and case_respondent:
-                            if order_respondent in case_respondent or case_respondent in order_respondent:
+                            if (
+                                order_respondent in case_respondent
+                                or case_respondent in order_respondent
+                            ):
                                 return True
                         elif not order_respondent:
                             return True
@@ -971,8 +997,16 @@ class Downloader:
                 # Try matching on combined parties string
                 if order_parties and case_parties:
                     # Normalize "vs" variations
-                    order_norm = re.sub(r"\s+", " ", order_parties.replace(" vs ", " ").replace(" v/s ", " "))
-                    case_norm = re.sub(r"\s+", " ", case_parties.replace(" vs ", " ").replace(" v/s ", " "))
+                    order_norm = re.sub(
+                        r"\s+",
+                        " ",
+                        order_parties.replace(" vs ", " ").replace(" v/s ", " "),
+                    )
+                    case_norm = re.sub(
+                        r"\s+",
+                        " ",
+                        case_parties.replace(" vs ", " ").replace(" v/s ", " "),
+                    )
                     if order_norm in case_norm or case_norm in order_norm:
                         return True
 
@@ -981,12 +1015,18 @@ class Downloader:
             party_matched = [c for c in candidates if parties_match(c)]
             if len(party_matched) == 1:
                 candidates = party_matched
-                logger.debug(f"Matched case by party names: {candidates[0].get('cino')}")
+                logger.debug(
+                    f"Matched case by party names: {candidates[0].get('cino')}"
+                )
             elif len(party_matched) > 1:
-                logger.debug(f"Multiple cases ({len(party_matched)}) matched by party names, using first")
+                logger.debug(
+                    f"Multiple cases ({len(party_matched)}) matched by party names, using first"
+                )
                 candidates = party_matched
             else:
-                logger.debug(f"No party name match found among {len(candidates)} candidates")
+                logger.debug(
+                    f"No party name match found among {len(candidates)} candidates"
+                )
 
         # Select the best candidate
         if not candidates:
@@ -1003,7 +1043,9 @@ class Downloader:
         # Fetch case history for selected case
         html = self.view_case_history(case_info)
         if not html:
-            logger.debug(f"No case history found for {case_number_full} (CNR: {case_info.get('cino')})")
+            logger.debug(
+                f"No case history found for {case_number_full} (CNR: {case_info.get('cino')})"
+            )
             return {}
 
         # Parse the HTML

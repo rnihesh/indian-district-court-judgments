@@ -9,7 +9,6 @@ Run repeatedly to complete all chunks from 1950 to present.
 import json
 import logging
 import signal
-import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -71,9 +70,7 @@ def get_next_chunk(
         chunk_start = datetime(START_YEAR, 1, 1)
 
     # Calculate chunk end (5 years from start)
-    chunk_end = datetime(
-        chunk_start.year + CHUNK_SIZE_YEARS - 1, 12, 31
-    )
+    chunk_end = datetime(chunk_start.year + CHUNK_SIZE_YEARS - 1, 12, 31)
 
     # Cap at today
     today = datetime.now()
@@ -119,9 +116,7 @@ class GracefulExit:
         """Check if timeout has been exceeded"""
         elapsed = time.time() - self.start_time
         if elapsed >= self.timeout_seconds:
-            logger.info(
-                f"Timeout of {self.timeout_seconds / 3600:.1f} hours exceeded"
-            )
+            logger.info(f"Timeout of {self.timeout_seconds / 3600:.1f} hours exceeded")
             self.should_exit = True
         return self.should_exit
 
@@ -203,7 +198,9 @@ def sync_s3_fill_gaps(
                     for location, archives in all_changes.items():
                         for archive_type, files in archives.items():
                             total_files_uploaded += len(files)
-                            logger.info(f"  {location}/{archive_type}: {len(files)} files")
+                            logger.info(
+                                f"  {location}/{archive_type}: {len(files)} files"
+                            )
 
                     # Track years for parquet processing
                     start_year = datetime.strptime(chunk_start, "%Y-%m-%d").year
@@ -217,7 +214,9 @@ def sync_s3_fill_gaps(
             if chunk_has_data:
                 logger.info(f"Chunk complete with data: {chunk_start} to {chunk_end}")
             else:
-                logger.info(f"Chunk empty (no data): {chunk_start} to {chunk_end}, moving to next...")
+                logger.info(
+                    f"Chunk empty (no data): {chunk_start} to {chunk_end}, moving to next..."
+                )
 
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
@@ -225,12 +224,15 @@ def sync_s3_fill_gaps(
         except Exception as e:
             logger.error(f"Error processing chunk: {e}")
             import traceback
+
             traceback.print_exc()
             break
 
     # Process metadata to parquet for all years that had data
     if all_years_processed:
-        logger.info(f"\nProcessing metadata to parquet for years: {sorted(all_years_processed)}")
+        logger.info(
+            f"\nProcessing metadata to parquet for years: {sorted(all_years_processed)}"
+        )
 
         try:
             processor = DistrictCourtMetadataProcessor(
@@ -243,11 +245,14 @@ def sync_s3_fill_gaps(
             processed_years, total_records = processor.process_bucket_metadata()
 
             if total_records > 0:
-                logger.info(f"Successfully processed {total_records} records to parquet")
+                logger.info(
+                    f"Successfully processed {total_records} records to parquet"
+                )
 
         except Exception as e:
             logger.error(f"Error processing metadata to parquet: {e}")
             import traceback
+
             traceback.print_exc()
     else:
         logger.info("No data was uploaded, skipping parquet processing")

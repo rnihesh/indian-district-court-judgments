@@ -7,7 +7,7 @@ import csv
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class CourtComplex:
     """Represents a court complex"""
+
     state_code: str
     state_name: str
     district_code: str
@@ -140,9 +141,7 @@ def get_unique_states(courts: List[CourtComplex]) -> List[tuple]:
     return result
 
 
-def get_unique_districts(
-    courts: List[CourtComplex], state_code: str
-) -> List[tuple]:
+def get_unique_districts(courts: List[CourtComplex], state_code: str) -> List[tuple]:
     """Get unique districts for a state as (district_code, district_name) tuples"""
     seen = set()
     result = []

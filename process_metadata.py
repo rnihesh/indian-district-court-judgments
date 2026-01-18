@@ -11,10 +11,8 @@ import argparse
 import json
 import logging
 import re
-import sys
 import tarfile
 import tempfile
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -227,7 +225,9 @@ class DistrictCourtMetadataProcessor:
             processed["first_hearing_date"] = metadata.get("first_hearing_date", "")
             processed["next_hearing_date"] = metadata.get("next_hearing_date", "")
             processed["case_stage"] = metadata.get("case_stage", "")
-            processed["court_number_and_judge"] = metadata.get("court_number_and_judge", "")
+            processed["court_number_and_judge"] = metadata.get(
+                "court_number_and_judge", ""
+            )
             processed["case_status"] = metadata.get("case_status", "")
 
             # Complex fields - convert lists/dicts to JSON strings for parquet
@@ -243,7 +243,9 @@ class DistrictCourtMetadataProcessor:
                     petitioners, ensure_ascii=False
                 )
             else:
-                processed["petitioners_with_advocates"] = petitioners if petitioners else ""
+                processed["petitioners_with_advocates"] = (
+                    petitioners if petitioners else ""
+                )
 
             respondents = metadata.get("respondents_with_advocates", "")
             if isinstance(respondents, list):
@@ -251,7 +253,9 @@ class DistrictCourtMetadataProcessor:
                     respondents, ensure_ascii=False
                 )
             else:
-                processed["respondents_with_advocates"] = respondents if respondents else ""
+                processed["respondents_with_advocates"] = (
+                    respondents if respondents else ""
+                )
 
             case_history = metadata.get("case_history", "")
             if isinstance(case_history, list):
@@ -327,7 +331,12 @@ class DistrictCourtMetadataProcessor:
         for tar_info in tars:
             records = self.process_tar_file(tar_info)
             if records:
-                key = (tar_info["year"], tar_info["state"], tar_info["district"], tar_info["complex"])
+                key = (
+                    tar_info["year"],
+                    tar_info["state"],
+                    tar_info["district"],
+                    tar_info["complex"],
+                )
                 if key not in records_by_key:
                     records_by_key[key] = []
                 records_by_key[key].extend(records)

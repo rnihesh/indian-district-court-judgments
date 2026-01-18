@@ -5,7 +5,6 @@ Handles syncing with S3 and incremental downloads
 
 import json
 import logging
-import re
 import tarfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -179,7 +178,9 @@ def run_sync_s3(
             actual_start = None  # Signal no download needed
             actual_end = None
         else:
-            actual_start = (overall_latest.date() + timedelta(days=1)).strftime("%Y-%m-%d")
+            actual_start = (overall_latest.date() + timedelta(days=1)).strftime(
+                "%Y-%m-%d"
+            )
             actual_end = today.strftime("%Y-%m-%d")
             logger.info(f"New data available from {actual_start} to {actual_end}")
 
@@ -257,4 +258,6 @@ def run_sync_s3(
         shutil.rmtree(local_dir)
         logger.info(f"Cleaned up local directory: {local_dir}")
     elif local_dir.exists():
-        logger.warning(f"Local directory NOT cleaned up (no sync performed): {local_dir}")
+        logger.warning(
+            f"Local directory NOT cleaned up (no sync performed): {local_dir}"
+        )

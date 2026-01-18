@@ -1,5 +1,5 @@
 # from https://huggingface.co/spaces/Acetde/captchabreaker/tree/main
-import os
+import logging
 from pathlib import Path
 
 import torch
@@ -8,6 +8,7 @@ import onnxruntime as rt
 from torchvision import transforms as T
 from .tokenizer_base import Tokenizer
 
+logger = logging.getLogger(__name__)
 
 # Get the directory where this file is located
 _current_dir = Path(__file__).parent
@@ -55,14 +56,8 @@ def get_text(img_org):
     probs = torch.tensor(logits).softmax(-1)
     preds, probs = tokenizer_base.decode(probs)
     preds = preds[0]
-    print(preds)
+    logger.debug("Captcha prediction: %s", preds)
     return preds
 
 
 transform, ort_session = initialize_model(model_file=model_file)
-
-
-# if __name__ == "__main__":
-#     image_path = "8000.png"
-#     preds,probs = get_text(image_path)
-#     print(preds[0])

@@ -6,10 +6,8 @@ Handles TAR archive uploads, downloads, and index file management
 import json
 import logging
 import os
-import tarfile
 import tempfile
-from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import List, Set
 
 import boto3
 
@@ -17,7 +15,11 @@ logger = logging.getLogger(__name__)
 
 
 def upload_large_file_to_s3(
-    s3_client, bucket: str, key: str, file_path: str, chunk_size: int = 100 * 1024 * 1024
+    s3_client,
+    bucket: str,
+    key: str,
+    file_path: str,
+    chunk_size: int = 100 * 1024 * 1024,
 ):
     """
     Upload large files using multipart upload

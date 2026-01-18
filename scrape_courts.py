@@ -9,7 +9,6 @@ Usage:
 """
 
 import argparse
-import json
 import logging
 import re
 import sys
@@ -306,7 +305,9 @@ class CourtHierarchyScraper:
                 # Small delay between API calls
                 time.sleep(0.3)
 
-            logger.info(f"  Added {len(self.courts) - total_courts + len([c for c in self.courts if c.state_code == state_code])} complexes")
+            logger.info(
+                f"  Added {len(self.courts) - total_courts + len([c for c in self.courts if c.state_code == state_code])} complexes"
+            )
 
         logger.info(f"Total court complexes found: {total_courts}")
 

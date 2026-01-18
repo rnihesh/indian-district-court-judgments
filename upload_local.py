@@ -11,7 +11,7 @@ import logging
 import tarfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 import boto3
 
@@ -29,7 +29,14 @@ def human_readable_size(size_bytes: int) -> str:
     return f"{size_bytes:.2f} TB"
 
 
-def create_index_for_tar(tar_path: Path, archive_type: str, year: str, state_code: str, district_code: str, complex_code: str) -> dict:
+def create_index_for_tar(
+    tar_path: Path,
+    archive_type: str,
+    year: str,
+    state_code: str,
+    district_code: str,
+    complex_code: str,
+) -> dict:
     """Create an index file for a TAR archive."""
     files = []
     total_size = 0
@@ -157,7 +164,9 @@ def upload_local_files(
                 raise
 
         tar_size = tar_path.stat().st_size
-        logger.info(f"Uploading {tar_name} ({human_readable_size(tar_size)}) for {year}/{state_code}/{district_code}/{complex_code}...")
+        logger.info(
+            f"Uploading {tar_name} ({human_readable_size(tar_size)}) for {year}/{state_code}/{district_code}/{complex_code}..."
+        )
 
         if dry_run:
             logger.info(f"  [DRY RUN] Would upload to: {s3_key}")
@@ -169,7 +178,9 @@ def upload_local_files(
 
         # Create and upload index file (only for main archive, not parts)
         if tar_name in ["orders.tar", "metadata.tar"]:
-            index = create_index_for_tar(tar_path, archive_type, year, state_code, district_code, complex_code)
+            index = create_index_for_tar(
+                tar_path, archive_type, year, state_code, district_code, complex_code
+            )
             index_key = s3_key.replace(".tar", ".index.json")
 
             s3.put_object(
@@ -186,7 +197,9 @@ def upload_local_files(
 
         uploaded_count += 1
 
-    logger.info(f"\nUpload complete: {uploaded_count} uploaded, {skipped_count} skipped (already in S3)")
+    logger.info(
+        f"\nUpload complete: {uploaded_count} uploaded, {skipped_count} skipped (already in S3)"
+    )
 
 
 def run_upload_local(
@@ -199,7 +212,9 @@ def run_upload_local(
     dry_run: bool = False,
 ):
     """Entry point for upload-local command."""
-    logger.info(f"Uploading local files from {local_dir} to s3://{s3_bucket}/{s3_prefix}")
+    logger.info(
+        f"Uploading local files from {local_dir} to s3://{s3_bucket}/{s3_prefix}"
+    )
 
     if state_code:
         logger.info(f"  Filtering by state: {state_code}")
@@ -252,11 +267,14 @@ def run_upload_local(
             processed_years, total_records = processor.process_bucket_metadata()
 
             if total_records > 0:
-                logger.info(f"Successfully processed {total_records} records to parquet")
+                logger.info(
+                    f"Successfully processed {total_records} records to parquet"
+                )
             else:
                 logger.warning("No new records were processed to parquet")
 
         except Exception as e:
             logger.error(f"Error processing metadata to parquet: {e}")
             import traceback
+
             traceback.print_exc()
