@@ -189,6 +189,43 @@ def decrypt_response_cbc(encrypted_str: str, key_hex: str = RESPONSE_KEY_HEX) ->
 
 
 # ============================================================================
+# Server-format encryption (for authtoken in PDF URLs)
+# ============================================================================
+
+def encrypt_server_format(data: str, key_hex: str = RESPONSE_KEY_HEX) -> str:
+    """
+    Encrypt data using server's format: IV (32 hex) + base64(ciphertext).
+
+    This is used for the authtoken parameter in PDF download URLs.
+    The server format uses a full 16-byte IV (32 hex chars) followed by base64-encoded
+    ciphertext, without the global index that our standard encrypt_data_cbc uses.
+
+    Args:
+        data: String to encrypt (e.g., "Bearer <encrypted_jwt>")
+        key_hex: AES key in hex format
+
+    Returns:
+        Encrypted string in format: IV (32 hex) + base64(ciphertext)
+    """
+    import random
+
+    key = _hex_to_bytes(key_hex)
+
+    # Generate random 16-byte IV
+    iv_bytes = bytes([random.randint(0, 255) for _ in range(16)])
+    iv_hex = _bytes_to_hex(iv_bytes)
+
+    # Encrypt
+    cipher = AES.new(key, AES.MODE_CBC, iv=iv_bytes)
+    padded = pad(data.encode('utf-8'), AES.block_size)
+    ciphertext = cipher.encrypt(padded)
+
+    # Format: IV (32 hex) + base64(ciphertext)
+    encrypted_b64 = base64.b64encode(ciphertext).decode('utf-8')
+    return f"{iv_hex}{encrypted_b64}"
+
+
+# ============================================================================
 # URL Parameter Decryption (for PDF URLs)
 # ============================================================================
 

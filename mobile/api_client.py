@@ -15,20 +15,20 @@ from pathlib import Path
 
 import requests
 
-from crypto import encrypt_data_cbc, decrypt_response_cbc, decrypt_url_param
+from crypto import encrypt_data_cbc, decrypt_response_cbc, decrypt_url_param, encrypt_server_format, RESPONSE_KEY_HEX
 from urllib.parse import urlparse, parse_qs, unquote
 
 
 # API Configuration
 BASE_URL = "https://app.ecourts.gov.in/ecourt_mobile_DC"
-PACKAGE_NAME = "gov.ecourts.eCourtsServices"
+PACKAGE_NAME = "in.gov.ecourts.eCourtsServices"  # Android package name
+APP_VERSION = "3.0"  # Current app version
 
-# Request headers
+# Request headers (Android style - required for token generation)
 DEFAULT_HEADERS = {
-    "Accept": "*/*",
-    "User-Agent": "eCourtsServices/2.0.1 (iPhone; iOS 26.2; Scale/3.00)",
-    "Accept-Language": "en-IN;q=1",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Charset": "UTF-8",
+    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 14; SM-X205 Build/UP1A.231005.007)",
+    "Accept-Encoding": "gzip",
 }
 
 
@@ -93,16 +93,134 @@ class Order:
 class MobileAPIClient:
     """Client for eCourts Mobile API."""
 
-    def __init__(self, base_url: str = BASE_URL):
+    def __init__(self, base_url: str = BASE_URL, auto_init: bool = False, verify_ssl: bool = False):
         self.base_url = base_url
         self.device_uuid = str(uuid.uuid4()).replace('-', '')[:16]
         self.jwt_token = ""
         self.jsession = f"JSESSION={random.randint(1000000, 99999999)}"
         self.session = requests.Session()
+        self.verify_ssl = verify_ssl  # API server uses self-signed certificate
+        self._initialized = False
+
+        if auto_init:
+            self.initialize_session()
 
     def _get_uid(self) -> str:
         """Get device UID."""
         return f"{self.device_uuid}:{PACKAGE_NAME}"
+
+    def initialize_session(self) -> bool:
+        """
+        Initialize session by calling appReleaseWebService.
+
+        This mimics the app's startup flow and provides a JWT token.
+
+        Returns:
+            True if initialization succeeded
+        """
+        if self._initialized:
+            return True
+
+        # Simple params format as used by the Android app
+        result = self._make_request(
+            "appReleaseWebService.php",
+            {
+                "version": APP_VERSION,
+            },
+            include_auth=False
+        )
+
+        if result:
+            self._initialized = True
+            # Token is automatically stored by _make_request if present
+            return True
+
+        return False
+
+    def set_jwt_token(self, token: str) -> None:
+        """
+        Set the JWT token directly.
+
+        Useful when the token is captured from traffic analysis.
+
+        Args:
+            token: The JWT token string
+        """
+        self.jwt_token = token
+        self._initialized = True
+
+    def get_jwt_token(self) -> str:
+        """Get the current JWT token."""
+        return self.jwt_token
+
+    def build_pdf_url(
+        self,
+        filename: str,
+        case_no: str,
+        court_code: str,
+        state_code: int,
+        dist_code: int,
+    ) -> str:
+        """
+        Build an authenticated PDF download URL.
+
+        The PDF URL requires:
+        1. params: PDF file info encrypted with server format (IV + base64)
+        2. authtoken: "Bearer " + encrypted_jwt, encrypted with server format
+
+        The encrypted_jwt is the JWT token encrypted with REQUEST_KEY using
+        the standard encrypt_data_cbc format. This is the same value used in
+        the Authorization header.
+
+        Args:
+            filename: PDF filename (e.g., '/orders/2025/xxx.pdf')
+            case_no: Case number
+            court_code: Court code
+            state_code: State code
+            dist_code: District code
+
+        Returns:
+            Complete URL with encrypted params and authtoken
+        """
+        import json
+
+        params = {
+            "filename": filename,
+            "caseno": case_no,
+            "cCode": court_code,
+            "appFlag": "1",
+            "state_cd": str(state_code),
+            "dist_cd": str(dist_code),
+            "court_code": court_code,
+            "bilingual_flag": "0",
+        }
+
+        # Encrypt params using server format (IV + base64) with RESPONSE_KEY
+        params_json = json.dumps(params)
+        encrypted_params = encrypt_server_format(params_json, RESPONSE_KEY_HEX)
+
+        # Encrypt JWT token with REQUEST_KEY (standard format for Authorization header)
+        jwt_token = self.jwt_token if self.jwt_token else ""
+        encrypted_jwt = encrypt_data_cbc(jwt_token)
+
+        # Construct auth value: "Bearer " + encrypted_jwt
+        auth_value = f"Bearer {encrypted_jwt}"
+
+        # Encrypt the whole auth value using server format with RESPONSE_KEY
+        encrypted_auth = encrypt_server_format(auth_value, RESPONSE_KEY_HEX)
+
+        return f"{self.base_url}/display_pdf.php?params={encrypted_params}&authtoken={encrypted_auth}"
+
+    def get_authorization_header(self) -> str:
+        """
+        Get the Authorization header value for API requests.
+
+        Returns:
+            Authorization header value (e.g., "Bearer <encrypted_jwt>")
+        """
+        jwt_token = self.jwt_token if self.jwt_token else ""
+        encrypted_jwt = encrypt_data_cbc(jwt_token)
+        return f"Bearer {encrypted_jwt}"
 
     def _make_request(
         self,
@@ -147,7 +265,8 @@ class MobileAPIClient:
                     url,
                     params={"params": encrypted_params},
                     headers=headers,
-                    timeout=60
+                    timeout=60,
+                    verify=self.verify_ssl
                 )
 
                 if response.status_code != 200:
@@ -249,8 +368,9 @@ class MobileAPIClient:
 
         complexes = []
         for c in result["courtComplex"]:
-            # njdg_est_code can be comma-separated list, take first one
-            njdg_code = str(c["njdg_est_code"]).split(",")[0].strip()
+            # njdg_est_code is a comma-separated list of court codes in this complex
+            # Keep the full string for use in search queries
+            njdg_code = str(c["njdg_est_code"]).strip()
             complexes.append(CourtComplex(
                 code=c["complex_code"],
                 name=c["court_complex_name"],
@@ -267,13 +387,20 @@ class MobileAPIClient:
         court_code: str,
         language: str = "english"
     ) -> list[CaseType]:
-        """Get case types for a court."""
+        """Get case types for a court.
+
+        Args:
+            court_code: Comma-separated court codes. Only the first one is used
+                       for fetching case types (they are shared across the complex).
+        """
+        # Use only the first court code (case types are shared across the complex)
+        first_court_code = court_code.split(",")[0].strip()
         result = self._make_request(
             "caseNumberWebService.php",
             {
                 "state_code": str(state_code),
                 "dist_code": str(dist_code),
-                "court_code": court_code,
+                "court_code": first_court_code,
                 "language_flag": language,
                 "bilingual_flag": "0",
             }
@@ -315,7 +442,7 @@ class MobileAPIClient:
         court_code: str,
         case_type: int,
         year: int,
-        pending_disposed: str = "D",
+        pending_disposed: str = "Disposed",
         language: str = "english"
     ) -> list[Case]:
         """
@@ -324,10 +451,10 @@ class MobileAPIClient:
         Args:
             state_code: State code
             dist_code: District code
-            court_code: Court code (from court complex)
+            court_code: Comma-separated court codes (njdg_est_code from court complex)
             case_type: Case type code
             year: Registration year
-            pending_disposed: "P" for pending, "D" for disposed
+            pending_disposed: "Pending" or "Disposed"
             language: Language flag
 
         Returns:
@@ -352,11 +479,14 @@ class MobileAPIClient:
 
         # print(f"   DEBUG search result: {json.dumps(result, indent=2)[:500]}")
 
-        # Response can be a dict with court_code -> cases
+        # Response is a dict with numeric keys (0, 1, ...) -> court entries
+        # Each entry has: court_code, establishment_name, caseNos[]
         cases = []
         if isinstance(result, dict):
             for court_key, court_data in result.items():
                 if isinstance(court_data, dict) and "caseNos" in court_data:
+                    # Get court_code from the court entry, not individual case
+                    entry_court_code = str(court_data.get("court_code", ""))
                     for c in court_data["caseNos"]:
                         cases.append(Case(
                             case_no=c.get("case_no") or c.get("filing_no", ""),
@@ -365,7 +495,7 @@ class MobileAPIClient:
                             case_number=c.get("case_no2", ""),
                             reg_year=c.get("reg_year", ""),
                             petitioner=c.get("petnameadArr", ""),
-                            court_code=str(c.get("court_code", court_key)),
+                            court_code=entry_court_code,
                         ))
 
         return cases
@@ -504,9 +634,9 @@ class MobileAPIClient:
         """
         Download a PDF from the given URL.
 
-        The PDF URLs contain encrypted params and authtoken that are session-bound.
-        This method extracts the params, re-encrypts them with the current session's
-        JWT token, and downloads the PDF.
+        The PDF URLs from case history contain encrypted params and authtoken that
+        are session-bound and already valid. This method uses them directly without
+        re-encrypting.
 
         Args:
             pdf_url: Full URL to the PDF (containing encrypted params/authtoken)
@@ -516,90 +646,62 @@ class MobileAPIClient:
         Returns:
             True if download succeeded, False otherwise
         """
-        # Parse the URL to extract encrypted params
+        # Parse the URL to extract params and authtoken
         parsed = urlparse(pdf_url)
         query_params = parse_qs(parsed.query)
 
         encrypted_params = query_params.get("params", [""])[0]
+        encrypted_auth = query_params.get("authtoken", [""])[0]
 
-        if not encrypted_params:
+        if not encrypted_params or not encrypted_auth:
             return False
 
-        try:
-            # Decrypt the original params to get the filename and other data
-            original_params = decrypt_url_param(encrypted_params)
+        # Build the request URL
+        base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
-            if not isinstance(original_params, dict):
-                return False
-
-            # Build fresh params with the same data
-            fresh_params = {
-                "filename": original_params.get("filename", ""),
-                "caseno": original_params.get("caseno", ""),
-                "cCode": original_params.get("cCode", ""),
-                "appFlag": original_params.get("appFlag", "1"),
-                "state_cd": original_params.get("state_cd", ""),
-                "dist_cd": original_params.get("dist_cd", ""),
-                "court_code": original_params.get("court_code", ""),
-                "bilingual_flag": original_params.get("bilingual_flag", "0"),
-            }
-
-            # Re-encrypt params
-            new_encrypted_params = encrypt_data_cbc(fresh_params)
-
-            # Encrypt our current JWT token as authtoken
-            auth_token = self.jwt_token if self.jwt_token else ""
-            encrypted_auth = encrypt_data_cbc(f"Bearer {auth_token}")
-
-            # Build the new URL
-            new_url = f"{self.base_url}/display_pdf.php"
-
-            headers = {
-                **DEFAULT_HEADERS,
-                "Cookie": self.jsession,
-            }
-
-        except Exception:
-            return False
+        headers = {
+            **DEFAULT_HEADERS,
+        }
 
         for attempt in range(retry_count):
             try:
                 response = self.session.get(
-                    new_url,
+                    base_url,
                     params={
-                        "params": new_encrypted_params,
+                        "params": encrypted_params,
                         "authtoken": encrypted_auth,
                     },
                     headers=headers,
                     timeout=120,
-                    stream=True
+                    verify=self.verify_ssl
                 )
 
                 if response.status_code == 200:
-                    # Check first few bytes to see if it's a PDF
-                    first_chunk = next(response.iter_content(chunk_size=4), b'')
+                    content = response.content
 
-                    if first_chunk == b'%PDF':
+                    # Server may return content with leading whitespace
+                    # Check if PDF magic bytes exist in first 20 bytes
+                    pdf_start = content.find(b'%PDF')
+                    if pdf_start >= 0 and pdf_start < 20:
+                        # Strip leading whitespace if present
+                        content = content[pdf_start:]
+
                         # Ensure directory exists
                         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
                         with open(output_path, "wb") as f:
-                            f.write(first_chunk)
-                            for chunk in response.iter_content(chunk_size=8192):
-                                f.write(chunk)
+                            f.write(content)
                         return True
                     else:
-                        # Might be encrypted error response, try to decrypt
-                        content = first_chunk + response.content
-                        if len(content) > 32:
-                            try:
-                                text = content.decode('utf-8', errors='ignore').strip()
-                                if all(c in '0123456789abcdef' for c in text[:32]):
-                                    decrypted = decrypt_response_cbc(text)
-                                    # If we got here, it's an error - retry won't help
-                                    return False
-                            except Exception:
-                                pass
+                        # Check if it's an encrypted error response
+                        try:
+                            text = content.decode('utf-8', errors='ignore').strip()
+                            if len(text) > 32 and all(c in '0123456789abcdef' for c in text[:32]):
+                                decrypted = decrypt_response_cbc(text)
+                                # Got an error response - retry won't help
+                                return False
+                        except Exception:
+                            pass
                         return False
 
             except requests.RequestException:
@@ -636,6 +738,8 @@ class MobileAPIClient:
         Returns:
             True if download succeeded, False otherwise
         """
+        import json as json_module
+
         # Build params
         params = {
             "filename": filename,
@@ -648,18 +752,25 @@ class MobileAPIClient:
             "bilingual_flag": "0",
         }
 
-        # Encrypt params
-        encrypted_params = encrypt_data_cbc(params)
+        # Encrypt params using server format (IV + base64) with RESPONSE_KEY
+        params_json = json_module.dumps(params)
+        encrypted_params = encrypt_server_format(params_json, RESPONSE_KEY_HEX)
 
-        # Encrypt our JWT token as authtoken
-        auth_token = self.jwt_token if self.jwt_token else ""
-        encrypted_auth = encrypt_data_cbc(f"Bearer {auth_token}")
+        # Encrypt JWT token with REQUEST_KEY (standard format)
+        jwt_token = self.jwt_token if self.jwt_token else ""
+        encrypted_jwt = encrypt_data_cbc(jwt_token)
+
+        # Construct and encrypt auth value using server format with RESPONSE_KEY
+        auth_value = f"Bearer {encrypted_jwt}"
+        encrypted_auth = encrypt_server_format(auth_value, RESPONSE_KEY_HEX)
 
         url = f"{self.base_url}/display_pdf.php"
 
+        # Include Authorization header with the same encrypted JWT
         headers = {
             **DEFAULT_HEADERS,
             "Cookie": self.jsession,
+            "Authorization": f"Bearer {encrypted_jwt}",
         }
 
         for attempt in range(retry_count):
@@ -672,7 +783,8 @@ class MobileAPIClient:
                     },
                     headers=headers,
                     timeout=120,
-                    stream=True
+                    stream=True,
+                    verify=self.verify_ssl
                 )
 
                 if response.status_code == 200:
@@ -687,6 +799,17 @@ class MobileAPIClient:
                                 f.write(chunk)
                         return True
                     else:
+                        # Try to decrypt error response
+                        content = first_chunk + response.content
+                        if len(content) > 32:
+                            try:
+                                text = content.decode('utf-8', errors='ignore').strip()
+                                if all(c in '0123456789abcdef' for c in text[:32]):
+                                    decrypted = decrypt_response_cbc(text)
+                                    # Log the error for debugging
+                                    print(f"PDF download error: {decrypted}")
+                            except Exception:
+                                pass
                         return False
 
             except requests.RequestException:

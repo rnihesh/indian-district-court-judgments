@@ -10,6 +10,7 @@ Key differences from Supreme Court:
 import io
 import json
 import logging
+import os
 import tarfile
 import threading
 from collections import defaultdict
@@ -589,6 +590,11 @@ class S3ArchiveManager:
         if not local_path or not local_path.exists():
             return
 
+        # Ensure all data is flushed to disk before any operations
+        # This prevents truncated archives when copying or uploading
+        with open(local_path, 'rb') as f:
+            os.fsync(f.fileno())
+
         # Record this part info
         part_size = local_path.stat().st_size
         part_info = {
@@ -766,6 +772,10 @@ class S3ArchiveManager:
             info = tarfile.TarInfo(name=filename)
             info.size = len(data)
             archive.addfile(info, io.BytesIO(data))
+
+            # Flush to disk to prevent data loss on crash
+            if hasattr(archive, 'fileobj') and archive.fileobj:
+                archive.fileobj.flush()
 
             # Track this file
             self.current_part_files[key].append(filename)
