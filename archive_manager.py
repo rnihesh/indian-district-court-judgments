@@ -929,6 +929,47 @@ class S3ArchiveManager:
 
         return uploaded_count
 
+    def flush_complex(
+        self,
+        state_code: str,
+        district_code: str,
+        complex_code: str,
+    ):
+        """
+        Flush and upload all archives for a specific complex.
+
+        This should be called after processing all data for a complex
+        to ensure archives are uploaded incrementally rather than
+        waiting until the end of the entire scraping process.
+        """
+        flushed_count = 0
+
+        # Find all keys matching this complex
+        keys_to_flush = [
+            key for key in list(self.archives.keys())
+            if key[1] == state_code and key[2] == district_code and key[3] == complex_code
+        ]
+
+        for key in keys_to_flush:
+            year, sc, dc, cc, archive_type = key
+
+            if self.local_only:
+                self._finalize_current_part(
+                    year, sc, dc, cc, archive_type, upload=False
+                )
+            else:
+                self._finalize_current_part(
+                    year, sc, dc, cc, archive_type, upload=True
+                )
+            flushed_count += 1
+
+        if flushed_count > 0:
+            logger.info(
+                f"Flushed {flushed_count} archives for {state_code}/{district_code}/{complex_code}"
+            )
+
+        return flushed_count
+
     def cleanup_empty_directories(self):
         """Remove directories that have no files after processing"""
         for year_dir in self.local_dir.glob("*"):

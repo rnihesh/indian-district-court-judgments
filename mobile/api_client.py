@@ -5,6 +5,7 @@ Provides access to the mobile app API for fetching court data.
 """
 
 import json
+import logging
 import random
 import re
 import time
@@ -14,6 +15,8 @@ from typing import Any, Optional
 from pathlib import Path
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 from crypto import encrypt_data_cbc, decrypt_response_cbc, decrypt_url_param, encrypt_server_format, RESPONSE_KEY_HEX
 from urllib.parse import urlparse, parse_qs, unquote
@@ -302,11 +305,13 @@ class MobileAPIClient:
                 except json.JSONDecodeError:
                     continue
 
-            except requests.RequestException:
+            except requests.RequestException as e:
+                logger.warning(f"Request to {endpoint} failed (attempt {attempt + 1}/{retry_count}): {e}")
                 if attempt < retry_count - 1:
                     time.sleep(1)
                 continue
 
+        logger.debug(f"All {retry_count} attempts to {endpoint} failed")
         return None
 
     def get_states(self) -> list[State]:
